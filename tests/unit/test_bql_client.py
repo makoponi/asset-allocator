@@ -1,6 +1,7 @@
 """Unit tests for BQL client protocol and mock client implementations."""
 
 from datetime import date
+from unittest.mock import patch
 
 import pytest
 
@@ -50,15 +51,9 @@ def test_mock_bloomberg_client_historical_bars() -> None:
     assert len(both_bars) == 2
 
 
-def test_real_bloomberg_client_offline_behavior() -> None:
-    client = RealBloombergClient()
-    # When blpapi is missing, raises RuntimeError
-    with pytest.raises(
-        RuntimeError, match="blpapi is not installed or Bloomberg Terminal is not running"
+def test_real_bloomberg_client_missing_dependencies() -> None:
+    with (
+        patch("builtins.__import__", side_effect=ImportError("No module named 'xbbg'")),
+        pytest.raises(RuntimeError, match="blpapi or xbbg is not installed"),
     ):
-        client.get_index_constituents("SXXP Index", "2024-01-31")
-
-    with pytest.raises(
-        RuntimeError, match="blpapi is not installed or Bloomberg Terminal is not running"
-    ):
-        client.get_historical_bars(["MC FP"], date(2024, 1, 1), date(2024, 1, 2))
+        RealBloombergClient()

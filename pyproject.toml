@@ -14,7 +14,14 @@ dependencies = [
     "lightgbm>=4.5.0",
     "cvxpy>=1.5.0",
     "pydantic>=2.9.0",
+    "blpapi>=3.26.7.1",
+    "xbbg>=1.4.6",
 ]
+
+[[tool.uv.index]]
+name = "bloomberg"
+url = "https://blpapi.bloomberg.com/repository/releases/python/simple/"
+explicit = false
 
 [project.optional-dependencies]
 dev = [
@@ -74,6 +81,7 @@ module = [
     "pyarrow.*",
     "scipy.*",
     "sklearn.*",
+    "xbbg.*",
 ]
 ignore_missing_imports = true
 
