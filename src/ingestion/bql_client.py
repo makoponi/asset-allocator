@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import date
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -224,37 +224,46 @@ class RealBloombergClient:
             logger.error("Error fetching historical bars: %s", e)
             return []
 
-        results: list[HistoricalBar] = []
         if df is None or len(df) == 0:
-            return results
+            return []
 
-        # Parse DataFrame structure
-        # (Handling multi-index columns from xbbg: (Ticker, Field))
-        if hasattr(df, "to_dict"):
-            pydict: dict[Any, Any] = df.to_dict()
-            for (t_sym, field_name), date_map in pydict.items():
-                if field_name != "PX_LAST":
+        # Parse long-format returned by xbbg: columns = ['ticker', 'date', 'field', 'value']
+        px_map: dict[tuple[str, date], float] = {}
+        vol_map: dict[tuple[str, date], float] = {}
+
+        if hasattr(df, "iter_rows"):
+            for r in df.iter_rows():
+                raw_t = str(r[0]).replace(" Equity", "").strip()
+                d_raw = r[1]
+                if hasattr(d_raw, "date"):
+                    d_obj = d_raw.date()
+                elif isinstance(d_raw, date):
+                    d_obj = d_raw
+                else:
+                    d_obj = date.fromisoformat(str(d_raw)[:10])
+
+                f_name = str(r[2])
+                try:
+                    val = float(r[3])
+                except ValueError, TypeError:
                     continue
-                clean_t = str(t_sym).replace(" Equity", "").strip()
-                vol_map = pydict.get((t_sym, "VOLUME"), {})
-                for d_val, px in date_map.items():
-                    if px is None or px != px:  # check NaN
-                        continue
-                    vol = vol_map.get(d_val, 0.0)
-                    if hasattr(d_val, "date"):
-                        d_obj = d_val.date()
-                    elif isinstance(d_val, date):
-                        d_obj = d_val
-                    else:
-                        d_obj = date.fromisoformat(str(d_val)[:10])
 
-                    results.append(
-                        HistoricalBar(
-                            date=d_obj,
-                            ticker=clean_t,
-                            px_last=float(px),
-                            volume=float(vol) if vol == vol and vol is not None else 0.0,
-                        )
-                    )
+                if f_name == "PX_LAST":
+                    px_map[(raw_t, d_obj)] = val
+                elif f_name == "VOLUME":
+                    vol_map[(raw_t, d_obj)] = val
 
+        results: list[HistoricalBar] = []
+        for (t_sym, d_val), px in px_map.items():
+            vol = vol_map.get((t_sym, d_val), 0.0)
+            results.append(
+                HistoricalBar(
+                    date=d_val,
+                    ticker=t_sym,
+                    px_last=px,
+                    volume=vol,
+                )
+            )
+
+        results.sort(key=lambda x: (x.date, x.ticker))
         return results
