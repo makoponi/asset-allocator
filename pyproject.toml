@@ -71,6 +71,7 @@ module = [
     "cvxpy.*",
     "hmmlearn.*",
     "lightgbm.*",
+    "pyarrow.*",
     "scipy.*",
     "sklearn.*",
 ]
