@@ -74,16 +74,25 @@ show_error_codes = true
 
 [[tool.mypy.overrides]]
 module = [
+    "blpapi",
     "blpapi.*",
+    "cvxpy",
     "cvxpy.*",
+    "hmmlearn",
     "hmmlearn.*",
+    "lightgbm",
     "lightgbm.*",
+    "pyarrow",
     "pyarrow.*",
+    "scipy",
     "scipy.*",
+    "sklearn",
     "sklearn.*",
+    "xbbg",
     "xbbg.*",
 ]
 ignore_missing_imports = true
+disallow_untyped_calls = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
