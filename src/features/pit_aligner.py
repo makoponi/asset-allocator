@@ -28,10 +28,12 @@ class AlignedFeatureRow:
     mom_12m: float
     beta_252d: float
     ivol_252d: float
-    # Fundamental factors (up to 8)
+    # Fundamental factors (10 core fields)
     pe_ratio: float | None = None
     best_pe_ratio: float | None = None
     px_to_book: float | None = None
+    fcf_yield: float | None = None
+    roe: float | None = None
     prof_margin: float | None = None
     oper_margin: float | None = None
     debt_to_equity: float | None = None
@@ -98,6 +100,8 @@ class PiTFeatureAligner:
                 pe_ratio=latest_metrics.get("PE_RATIO"),
                 best_pe_ratio=latest_metrics.get("BEST_PE_RATIO"),
                 px_to_book=latest_metrics.get("PX_TO_BOOK_RATIO"),
+                fcf_yield=latest_metrics.get("FREE_CASH_FLOW_YIELD"),
+                roe=latest_metrics.get("RETURN_COM_EQY"),
                 prof_margin=latest_metrics.get("PROF_MARGIN"),
                 oper_margin=latest_metrics.get("OPER_MARGIN"),
                 debt_to_equity=latest_metrics.get("TOT_DEBT_TO_TOT_EQY"),
