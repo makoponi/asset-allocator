@@ -133,7 +133,15 @@ class MLRanker:
         if X_t.empty or "ticker" not in X_t.columns:
             return []
 
-        preds = self.predict(X_t)
+        try:
+            preds = self.predict(X_t)
+        except Exception:
+            # Cold-start fallback: rank by momentum 12m if available, else zeros
+            if "mom_12m" in X_t.columns:
+                preds = np.asarray(X_t["mom_12m"].fillna(0.0), dtype=float)
+            else:
+                preds = np.zeros(len(X_t), dtype=float)
+
         df_ranked = X_t[["ticker"]].copy()
         df_ranked["score"] = preds
         df_ranked = df_ranked.sort_values(by="score", ascending=False)
