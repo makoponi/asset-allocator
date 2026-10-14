@@ -55,13 +55,20 @@ def run_cli_backtest(
     cost_bps: float = 10.0,
     top_n: int = 50,
     max_weight: float = 0.04,
+    enable_overlay: bool = False,
 ) -> None:
     start_d = date.fromisoformat(start_date_str)
     end_d = date.fromisoformat(end_date_str)
 
+    overlay_desc = (
+        "ATTIVO (Gaussian HMM 3-Stati + Isteresi 3d)"
+        if enable_overlay
+        else "DISATTIVATO (Long-Only Puro)"
+    )
     print("==================================================")
     print("BACKTESTING WALK-FORWARD: ASSET ALLOCATOR ENGINE")
     print(f"Orizzonte: {start_date_str} -> {end_date_str}")
+    print(f"Hedging Overlay Macro: {overlay_desc}")
     print(f"Frequenza Riaddestramento: ogni {retrain_freq_months} mesi")
     print(f"Costi di Transazione: {cost_bps:.1f} bps (fee + slippage)")
     print(f"Portafoglio: Top {top_n} titoli | Max Weight: {max_weight * 100:.1f}%")
@@ -69,6 +76,18 @@ def run_cli_backtest(
 
     t0 = time.time()
     store = MarketStore()
+
+    hedging_overlay = None
+    if enable_overlay:
+        from src.risk.hedging_overlay import HedgingOverlay
+
+        hedging_overlay = HedgingOverlay(
+            hysteresis_days=3,
+            threshold_prob=0.65,
+            hedge_ratio_state_0=0.0,
+            hedge_ratio_state_1=0.40,
+            hedge_ratio_state_2=0.90,
+        )
 
     # Lookback 2 years prior to start_date for 504d covariance matrix
     lookback_year = max(2011, start_d.year - 2)
@@ -86,12 +105,14 @@ def run_cli_backtest(
         cost_bps=cost_bps,
         top_n=top_n,
         max_weight=max_weight,
+        hedging_overlay=hedging_overlay,
     )
 
     print("Avvio simulazione walk-forward giornaliera...")
     res = engine.run_simulation(start_d, end_d, initial_capital=100.0)
     elapsed = time.time() - t0
     print(f"Simulazione completata in {elapsed:.2f}s.\n")
+
 
     p = res.metrics
     b = res.benchmark_metrics
@@ -194,6 +215,12 @@ def main() -> None:
         default=0.04,
         help="Peso massimo per singolo titolo (default: 0.04)",
     )
+    parser.add_argument(
+        "--overlay",
+        action="store_true",
+        default=False,
+        help="Attiva copertura macroregime dinamica con future su indici e isteresi a 3 giorni.",
+    )
     args = parser.parse_args()
 
     run_cli_backtest(
@@ -203,7 +230,9 @@ def main() -> None:
         cost_bps=args.cost_bps,
         top_n=args.top_n,
         max_weight=args.max_weight,
+        enable_overlay=args.overlay,
     )
+
 
 
 if __name__ == "__main__":

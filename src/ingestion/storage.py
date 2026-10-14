@@ -15,6 +15,9 @@ import pyarrow.parquet as pq
 if TYPE_CHECKING:
     from collections.abc import Generator, Sequence
 
+    import pandas as pd
+
+
 DEFAULT_DB_PATH = Path("data/market_store.db")
 DEFAULT_PARQUET_DIR = Path("data/processed")
 
@@ -276,6 +279,29 @@ class MarketStore:
                 MacroSeriesRecord(date=row[0], series_id=row[1], value=float(row[2]))
                 for row in cursor.fetchall()
             ]
+
+    def get_macro_matrix(
+        self,
+        series_ids: list[str] | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> pd.DataFrame:
+        """Fetch macro series pivoted as a wide DataFrame (index=date, columns=series_id)."""
+        import pandas as pd
+
+        records = self.get_macro_series(start_date=start_date, end_date=end_date)
+        if not records:
+            return pd.DataFrame()
+        df = pd.DataFrame(
+            [{"date": r.date, "series_id": r.series_id, "value": r.value} for r in records]
+        )
+        if series_ids is not None:
+            df = df[df["series_id"].isin(series_ids)]
+        pivoted = df.pivot(index="date", columns="series_id", values="value")
+        pivoted.index.name = "date"
+        pivoted = pivoted.sort_index().ffill().bfill()
+        return pivoted
+
 
 
 class PriceStore:

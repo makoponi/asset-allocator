@@ -53,6 +53,8 @@ class BacktestEngine:
         cost_bps: float = 10.0,
         top_n: int = 50,
         max_weight: float = 0.04,
+        hedging_overlay: Any | None = None,
+        future_cost_bps: float = 2.0,
     ) -> None:
         self.market_store = market_store
         self.tech_engine = tech_engine
@@ -61,6 +63,9 @@ class BacktestEngine:
         self.cost_bps = cost_bps
         self.top_n = top_n
         self.max_weight = max_weight
+        self.hedging_overlay = hedging_overlay
+        self.future_cost_bps = future_cost_bps
+
 
         # Index price bars by (date, ticker) -> ret_1d
         self._ret_map: dict[tuple[date, str], float] = {}
@@ -193,8 +198,32 @@ class BacktestEngine:
         rebalance_set = set(rebalance_dates)
         allocator = PortfolioAllocator(method="hrp", denoise=True, max_weight=self.max_weight)
 
+        # Precompute macro regime signals if hedging overlay is enabled
+        overlay_map: dict[str, tuple[float, int]] = {}
+        if self.hedging_overlay is not None:
+            macro_df = self.market_store.get_macro_matrix(end_date=end_str)
+            if not macro_df.empty and len(macro_df) >= 50:
+                from src.risk.macro_regime import GaussianRegimeHMM
+
+                hmm = GaussianRegimeHMM(n_states=3, n_iter=30)
+                try:
+                    hmm.fit(macro_df)
+                    probs_df = hmm.predict_filtered_probabilities(macro_df)
+                    overlay_df = self.hedging_overlay.simulate_overlay_series(probs_df)
+                    for idx_d, r_row in overlay_df.iterrows():
+                        overlay_map[str(idx_d)] = (
+                            float(r_row["effective_hedge_ratio"]),
+                            int(r_row["dominant_regime"]),
+                        )
+                except Exception as e:
+                    logger.warning("Failed to fit macro HMM for overlay: %s", e)
+
+        current_unhedged_nav = initial_capital
+        prev_h = 0.0
+
         # Advance day by day
         for d in all_trading_days:
+
             # Check if today is a rebalance day
             if d in rebalance_set:
                 rebalance_counter += 1
@@ -301,8 +330,18 @@ class BacktestEngine:
             else:
                 b_ret = 0.0
 
+            # Calculate overlay effect if hedging is enabled
+            h_d, reg_d = overlay_map.get(d.isoformat(), (0.0, 0))
+            future_fee = abs(h_d - prev_h) * (self.future_cost_bps / 10000.0)
+            prev_h = h_d
+
+            # Hedged net return = stock portfolio return
+            # - hedge_ratio * benchmark_return - future_friction
+            net_p_ret = p_ret - (h_d * b_ret) - future_fee
+
             # Update NAVs
-            current_nav *= 1.0 + p_ret
+            current_unhedged_nav *= 1.0 + p_ret
+            current_nav *= 1.0 + net_p_ret
             benchmark_nav *= 1.0 + b_ret
 
             # Drift weights: w_{i, d+1} = w_{i, d} * (1 + R_{i, d}) / (1 + R_{P, d})
@@ -316,9 +355,13 @@ class BacktestEngine:
                 {
                     "date": d.isoformat(),
                     "portfolio_nav": current_nav,
+                    "unhedged_nav": current_unhedged_nav,
                     "benchmark_nav": benchmark_nav,
-                    "portfolio_ret": p_ret,
+                    "portfolio_ret": net_p_ret,
+                    "unhedged_ret": p_ret,
                     "benchmark_ret": b_ret,
+                    "effective_hedge_ratio": h_d,
+                    "dominant_regime": reg_d,
                 }
             )
 
