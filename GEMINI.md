@@ -54,6 +54,8 @@ Gli agenti devono implementare controlli assertivi (`assert` o eccezioni custom)
    * *HMM:* È severamente vietato fare `.fit()` dell'Hidden Markov Model sull'intera serie storica. L'addestramento deve avvenire in **Expanding Window** (ricalibrazione mensile usando solo dati fino a $t$) e la probabilità di stato in $t$ deve essere calcolata tramite *forward filtering* puro, mai tramite algoritmo di Viterbi sull'intero campione.
 6. **Ponte Bloomberg Ibrido Realistico:**
    * L'API Python `blpapi` desktop non espone nativamente BQL fuori dall'ambiente BQuant. L'ingestione massiva storica BQL viene gestita tramite loader dedicati da export BQL/Excel (`data/raw_bql_exports/*.parquet` o `.csv`) verso SQLite, mentre gli aggiornamenti delta usano `xbbg` (`bdp`/`bdh`) con caching idempotente rigoroso.
+   * Nelle interrogazioni storiche `bdh`, assicurare sempre l'append del suffisso `Equity` (es. `f"{t} Equity"`) in input e il recupero pulito in output per prevenire errori `BAD_SEC` del DAPI.
+   * Tutti i download massivi di serie giornaliere devono eseguire il checkpointing immediato batch-by-batch su Parquet con supporto a `--skip-existing`.
 
 ---
 
@@ -130,17 +132,25 @@ quant-portfolio/
   3. Modello Ensemble (**LightGBM Regressor** / **Random Forest** con iperparametri anti-overfitting: `max_depth=4`, `min_child_samples=30`, regolarizzazione L1/L2).
   4. **Selezione Stratified Top-Decile:** Estrazione dei migliori **30–35 titoli del blocco `NA`** e dei migliori **20–25 titoli del blocco `EU`** (totale: **50–60 azioni**), garantendo una diversificazione strutturale transatlantica prima dell'ottimizzazione dei pesi.
 
-### Fase 5: Resampling Sincronizzato, Denoising di Marcenko-Pastur e Allocazione (HRP / CVaR)
+### Fase 5: Resampling Sincronizzato, Denoising di Marcenko-Pastur e Allocazione (HRP / CVaR) [COMPLETED]
 * **Obiettivo:** Stimare la vera struttura di correlazione transatlantica sui 50-60 titoli selezionati ed eseguire l'allocazione ottimale del capitale.
-* **Deliverables:**
-  1. **Sincronizzatore Multi-Day:** Modulo che trasforma i rendimenti giornalieri in EUR degli ultimi 2 anni ($T_{\text{daily}} = 504$) in **rendimenti a 3 giorni lavorativi** ($T_{3d} = 168$) o settimanali per annullare l'effetto del fuso orario (17:30 CET vs 22:00 CET).
-  2. Modulo `MarcenkoPasturDenoiser`:
+* **Deliverables Realizzati:**
+  1. **Sincronizzatore Multi-Day (`MultiDaySynchronizer`):** Trasforma i rendimenti giornalieri in EUR degli ultimi 2 anni ($T_{\text{daily}} = 504$) in **rendimenti a 3 giorni lavorativi non sovrapposti** ($T_{3d} \approx 168$) per annullare l'effetto del fuso orario (17:30 CET vs 22:00 CET).
+  2. **Modulo `MarcenkoPasturDenoiser`:**
      * Calcolo della matrice di correlazione empirica $\mathbf{C}$ sui rendimenti sincronizzati.
      * Calcolo della soglia del rumore $\lambda_+ = \sigma^2 \left(1 + \sqrt{\frac{N}{T}}\right)^2$.
-     * Sostituzione degli autovalori $\lambda_i \le \lambda_+$ con la loro media costante (preservando la traccia unitaria) e ricostruzione della matrice di covarianza depurata $\tilde{\mathbf{\Sigma}}$.
-  3. Modulo `HierarchicalRiskParity` (con linkage di Ward e bisezione ricorsiva) e modulo alternativo `MeanCVaROptimizer` ($\beta = 0.95$) con vincoli rigidi:
-     * Peso singolo titolo: $0.005 \le w_i \le 0.035$ (max 3.5% per azione).
-     * Banda regionale: Peso complessivo Sleeve `NA` $\in [50\%, 65\%]$; Peso complessivo Sleeve `EU` $\in [35\%, 50\%]$.
+     * Sostituzione degli autovalori $\lambda_i \le \lambda_+$ con la loro media costante $\bar{\lambda}_{\text{noise}}$ (preservando analiticamente la traccia $\text{Tr}(\tilde{\mathbf{C}}) = N$) e riscalatura diagonale per garantire $C_{ii} = 1.0$. Ricostruzione della matrice di covarianza depurata $\tilde{\mathbf{\Sigma}} = \mathbf{S} \tilde{\mathbf{C}} \mathbf{S}$.
+  3. **Modulo `HierarchicalRiskParity` (HRP):**
+     * Distanza di correlazione $d_{ij} = \sqrt{0.5(1 - \rho_{ij})}$, Ward linkage, quasi-diagonalizzazione e recursive bisection.
+     * Proiezione convessa quadratica (QP) post-bisezione per garantire rigorosamente i vincoli:
+       * Singolo titolo: $0.005 \le w_i \le 0.035$ (max 3.5%, min 0.5%).
+       * Pesi regionali: Sleeve `NA` $\in [50\%, 65\%]$; Sleeve `EU` $\in [35\%, 50\%]$.
+       * Budget: $\sum w_i = 1.0$.
+  4. **Modulo `MeanCVaROptimizer` ($\beta = 0.95$):**
+     * Formulazione convessa Rockafellar-Uryasev su `cvxpy` con solver `CLARABEL` e rispetto identico dei vincoli di titolo e sleeve.
+  5. **Pipeline e CLI (`allocate`):**
+     * Modulo `PortfolioAllocationPipeline` e comando `quant-portfolio allocate` per calcolo allocazione, volatilità annualizzata 3d, CVaR ed MCTR.
+     * Test suite estesa a 89 test unitari e di integrazione passati (100%).
 
 ### Fase 6: Doppio Sensore di Regime (NA + EU) e Dual-Sleeve Beta-Adjusted Hedging
 * **Obiettivo:** Proteggere indipendentemente la componente Nord Americana e la componente Europea del portafoglio tramite i rispettivi contratti future su indici.
