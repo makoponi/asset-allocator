@@ -213,6 +213,13 @@ class WalkForwardBacktestEngine:
                             "annualized_vol": risk_summary.annualized_volatility,
                         }
                     )
+                    print(
+                        f"[{current_date}] Rebalance #{total_rebalances:02d} | "
+                        f"Allocated: {risk_summary.n_stocks} "
+                        f"({risk_summary.n_na} NA, {risk_summary.n_eu} EU) | "
+                        f"NAV: EUR {nav_hedged:,.2f}",
+                        flush=True,
+                    )
             else:
                 days_since_rebalance += 1
 
@@ -353,6 +360,13 @@ class WalkForwardBacktestEngine:
                 }
             )
 
+            if (i + 1) % 63 == 0 or (i + 1) == len(calendar):
+                print(
+                    f"  [Progress] Step {i + 1:3d}/{len(calendar)} ({current_date}) | "
+                    f"Hedged NAV: EUR {nav_hedged:,.2f} | Unhedged NAV: EUR {nav_unhedged:,.2f}",
+                    flush=True,
+                )
+
         daily_history_df = pd.DataFrame(daily_records)
         rebalance_log_df = pd.DataFrame(rebalance_records)
 
@@ -417,9 +431,18 @@ class WalkForwardBacktestEngine:
                 )
 
         # Fallback loader extracting universe from SQLite if no custom loader is provided
-        df = self.store.get_universe_pit(as_of_date=as_of_date, exclude_financials=True)
-        if df.empty:
+        query = "SELECT MAX(as_of_date) FROM universe_pit WHERE as_of_date <= ?"
+        with self.store.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(query, (as_of_date,))
+            row = cur.fetchone()
+            latest_date = str(row[0]) if row and row[0] is not None else None
+
+        if latest_date is not None:
+            df = self.store.get_universe_pit(as_of_date=latest_date, exclude_financials=True)
+        else:
             df = self.store.get_universe_pit(exclude_financials=True)
+
         if df.empty:
             return pd.DataFrame(
                 columns=["ticker", "region_bloc", "score", "regional_decile", "regional_rank"]

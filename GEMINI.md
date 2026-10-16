@@ -208,3 +208,22 @@ quant-portfolio/
      * `quant-portfolio rebalance --date 2026-10-16 --capital 10000000 --method hrp --holdings current_portfolio.csv --output orders.csv`
   6. **Test Suite Completa:**
      * Suite espansa a 122 test unitari e di integrazione passati (100%), coprendo tutti i moduli dell'infrastruttura.
+
+### Fase 8: Backup Transazionale e Dashboard Interattiva di Gestione [COMPLETED]
+* **Obiettivo:** Garantire la resilienza dei dati tramite backup a caldo transazionale e fornire una dashboard interattiva per la gestione del portafoglio e il monitoraggio del rischio.
+* **Deliverables Realizzati:**
+  1. **Modulo di Backup Transazionale (`DataBackupManager` in `storage/backup.py`):**
+     * Copia atomica a caldo di `quant_store.db` tramite API nativa `sqlite3.Connection.backup(target_conn)` in directory temporanea.
+     * Compressione e archiviazione di SQLite DB, dell'intero datalake Parquet (`data/parquet/`) e degli export drop-zone BQL (`data/raw_bql_exports/`) in formato `data/backups/quant_backup_<YYYYMMDD_HHMMSS>.zip`.
+     * Rotazione automatica delle retention per mantenere solo gli ultimi `N` archivi (`keep_last_n: int = 10`).
+     * Supporto alla duplicazione dell'archivio su percorso esterno (es. share di rete / NAS).
+     * Comando CLI: `quant-portfolio backup [--dest-dir PATH] [--keep 10]`.
+  2. **Dashboard Interattiva di Gestione (`dashboard/app.py`):**
+     * Applicazione Streamlit a 4 Tab con grafici interattivi Plotly:
+       * **Tab 1 - Regime & Hedging Shield:** visualizzazione probabilità HMM e stato filtrato a 3 giorni per NA ed EU; calcolatore dinamico real-time dei contratti future (`ES`/`MES`, `FXXP`/`FESX`) da shortare al variare del capitale e del cambio EUR/USD.
+       * **Tab 2 - Allocazione & Rischio:** selezione data contabile e metodo (`hrp`, `cvar`, `ensemble`), controllo sleeve regionali, tabella dei 60 titoli con pesi e `MCTR`, grafici Plotly regionali.
+       * **Tab 3 - Ribilanciamento & Ordini (Delta):** upload file posizioni attuali (o partenza da cassa), applicazione del `TurnoverBufferFilter` (regola del 3° decile), distinta ordini `BUY`/`SELL`/`HOLD` con stima costi di transazione in EUR ed export CSV.
+       * **Tab 4 - Walk-Forward Backtest:** esecuzione simulazione o visualizzazione risultati storici, curve NAV Hedged vs Unhedged, grafici di Drawdown e tabella di attribuzione dell'overlay future.
+     * Comando CLI: `quant-portfolio dashboard [--host HOST] [--port PORT]`.
+  3. **Test Suite Completa:**
+     * Suite espansa a **131 test unitari e di integrazione passati (100%)**, con `mypy --strict` e `ruff` al 100% conformi.

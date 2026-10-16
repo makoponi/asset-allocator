@@ -29,6 +29,7 @@ from quant_portfolio.ingestion.fred_macro import FREDMacroDownloader
 from quant_portfolio.ingestion.pipeline import TransatlanticIngestionPipeline
 from quant_portfolio.ingestion.xbbg_fundamentals import BloombergFundamentalsDownloader
 from quant_portfolio.risk.pipeline import AllocationMethod, PortfolioAllocationPipeline
+from quant_portfolio.storage.backup import DataBackupManager
 from quant_portfolio.storage.schema import ParquetMarketStore, SQLiteStore
 
 
@@ -655,6 +656,7 @@ def cmd_backtest(
     rebalance_freq: int = 21,
     enable_hedging: bool = True,
     output_dir: str | None = None,
+    fast_ranking: bool = False,
 ) -> None:
     """Run full Walk-Forward backtest simulation and output quantitative report."""
     cfg = PortfolioConfig()
@@ -668,11 +670,19 @@ def cmd_backtest(
     print(f"Optimization Method:     {method.upper()}")
     print(f"Rebalance Frequency:     Every {rebalance_freq} business days (Monthly)")
     print(f"Dynamic Futures Hedging: {'ENABLED' if enable_hedging else 'DISABLED'}")
+    mode_str = (
+        "FAST (Deterministic/Universe PiT)" if fast_ranking else "FULL (Expanding Walk-Forward ML)"
+    )
+    print(f"Ranking Mode:            {mode_str}")
 
-    alpha_pipe = AlphaPipeline(
-        config=cfg,
-        sqlite_store=sqlite_store,
-        parquet_store=parquet_store,
+    alpha_pipe = (
+        None
+        if fast_ranking
+        else AlphaPipeline(
+            config=cfg,
+            sqlite_store=sqlite_store,
+            parquet_store=parquet_store,
+        )
     )
 
     engine = WalkForwardBacktestEngine(
@@ -823,6 +833,51 @@ def cmd_rebalance(
         else:
             delta_orders_df.to_csv(out_p, index=False)
         print(f"[Done] Exported rebalance orders to: {out_p.resolve()}")
+
+
+def cmd_backup(dest_dir: str | None = None, keep_last_n: int = 10) -> None:
+    """Execute atomic SQLite backup and archive Parquet/BQL files into compressed ZIP."""
+    cfg = PortfolioConfig()
+    mgr = DataBackupManager(config=cfg)
+    print("=== Quant Portfolio - Data Backup ===")
+    print(f"Database source:    {mgr.db_path} (Exists: {mgr.db_path.exists()})")
+    print(f"Parquet dir:        {mgr.parquet_dir} (Exists: {mgr.parquet_dir.exists()})")
+    print(f"Drop-zone dir:      {mgr.raw_bql_dir} (Exists: {mgr.raw_bql_dir.exists()})")
+    print(f"Backups target dir: {mgr.backups_dir}")
+    print(f"Retention limit:    Keep last {keep_last_n} archives")
+    if dest_dir:
+        print(f"External duplicate: {dest_dir}")
+
+    archive = mgr.create_backup(keep_last_n=keep_last_n, dest_dir=dest_dir)
+    size_mb = archive.stat().st_size / (1024 * 1024)
+    print(f"[Done] Backup created successfully: {archive.name} ({size_mb:.2f} MB)")
+
+
+def cmd_dashboard(host: str = "localhost", port: int = 8501) -> None:
+    """Launch Streamlit management dashboard."""
+    import subprocess
+
+    app_path = Path(__file__).parent / "dashboard" / "app.py"
+    if not app_path.exists():
+        print(f"[ERROR] Dashboard entrypoint not found at: {app_path}")
+        sys.exit(1)
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "streamlit",
+        "run",
+        str(app_path),
+        "--server.address",
+        host,
+        "--server.port",
+        str(port),
+    ]
+    print(f"Launching Streamlit dashboard on http://{host}:{port}...")
+    try:
+        subprocess.run(cmd, check=True)
+    except KeyboardInterrupt:
+        print("\n[Dashboard] Shutdown requested by user.")
 
 
 def main() -> None:
@@ -1001,6 +1056,11 @@ def main() -> None:
     p_bt.add_argument(
         "--output-dir", "-o", help="Optional output directory to export CSV artifacts"
     )
+    p_bt.add_argument(
+        "--fast-ranking",
+        action="store_true",
+        help="Use fast universe ranking without full on-the-fly ML retraining",
+    )
 
     # rebalance
     p_reb = subparsers.add_parser(
@@ -1033,6 +1093,32 @@ def main() -> None:
     )
     p_fm.add_argument("--start", "-s", default="2010-01-01", help="Start date (YYYY-MM-DD)")
     p_fm.add_argument("--end", "-e", default=None, help="End date (YYYY-MM-DD)")
+
+    # backup
+    p_bk = subparsers.add_parser(
+        "backup", help="Create atomic compressed backup of SQLite DB and Parquet datalake"
+    )
+    p_bk.add_argument(
+        "--dest-dir",
+        "-d",
+        help="Optional external destination directory (e.g. NAS / network drive)",
+    )
+    p_bk.add_argument(
+        "--keep",
+        "-k",
+        type=int,
+        default=10,
+        help="Number of recent backups to keep (default: 10)",
+    )
+
+    # dashboard
+    p_dash = subparsers.add_parser(
+        "dashboard", help="Launch interactive Streamlit management dashboard"
+    )
+    p_dash.add_argument(
+        "--host", default="localhost", help="Server host address (default: localhost)"
+    )
+    p_dash.add_argument("--port", "-p", type=int, default=8501, help="Server port (default: 8501)")
 
     args = parser.parse_args()
     if args.command == "status":
@@ -1120,6 +1206,7 @@ def main() -> None:
             rebalance_freq=args.rebalance_freq,
             enable_hedging=not args.no_hedge,
             output_dir=args.output_dir,
+            fast_ranking=args.fast_ranking,
         )
     elif args.command == "rebalance":
         cmd_rebalance(
@@ -1132,6 +1219,10 @@ def main() -> None:
         )
     elif args.command == "fetch-macro":
         cmd_fetch_macro(start_date=args.start, end_date=args.end)
+    elif args.command == "backup":
+        cmd_backup(dest_dir=args.dest_dir, keep_last_n=args.keep)
+    elif args.command == "dashboard":
+        cmd_dashboard(host=args.host, port=args.port)
     else:
         parser.print_help()
 

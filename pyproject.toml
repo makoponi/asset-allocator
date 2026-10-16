@@ -21,6 +21,8 @@ dependencies = [
     "scipy>=1.13.0",
     "blpapi>=3.26.7.1",
     "xbbg>=1.4.6",
+    "streamlit>=1.66.0",
+    "plotly>=7.1.0",
 ]
 
 [[tool.uv.index]]
@@ -82,6 +84,10 @@ module = [
     "blpapi.*",
     "xbbg",
     "xbbg.*",
+    "streamlit",
+    "streamlit.*",
+    "plotly",
+    "plotly.*",
 ]
 ignore_missing_imports = true
 disallow_untyped_calls = false

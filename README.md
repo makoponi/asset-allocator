@@ -4,7 +4,7 @@
 [![Package Manager](https://img.shields.io/badge/managed%20by-uv-purple.svg)](https://github.com/astral-sh/uv)
 [![Code Style](https://img.shields.io/badge/code%20style-ruff-black.svg)](https://github.com/astral-sh/ruff)
 [![Type Checking](https://img.shields.io/badge/type%20checking-mypy%20--strict-blue.svg)](https://mypy-lang.org/)
-[![Tests](https://img.shields.io/badge/tests-122%20passed%20(100%25)-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-131%20passed%20(100%25)-brightgreen.svg)](tests/)
 
 Sistema quantitativo end-to-end per la gestione e l'allocazione ottimale di un portafoglio azionario **Long-Only Transatlantico** (**USA + Canada + Europa**, *ex-Financials*), progettato per massimizzare il *Tail Risk Alpha* e mitigare i Drawdown severi tramite:
 
@@ -13,6 +13,7 @@ Sistema quantitativo end-to-end per la gestione e l'allocazione ottimale di un p
 3. **Allocazione Topologica e Tail-Oriented:** Hierarchical Risk Parity (HRP) e Mean-CVaR ($\beta=0.95$) con proiezione convessa su vincoli realistici di singolo titolo ($0.5\% \le w_i \le 3.5\%$) e sleeve regionali (NA: $50-65\%$, EU: $35-50\%$).
 4. **Dual-Sleeve Dynamic Hedging:** Copertura bipartita tramite contratti future su indici (`ES`/`MES` per Nord America, `FXXP`/`FESX` per Europa) guidata da sensori indipendenti HMM espansivi, Turbolenza di Mahalanobis e filtro di isteresi a 3 giorni.
 5. **Simulatore Walk-Forward & Pipeline di Produzione:** Motore di contabilità giornaliera multi-valuta (EUR Base), modellazione dei costi di transazione (5 bps NA, 10 bps EU, 1.5 bps future), buffer di decile anti-turnover e distinta ordini per il ribilanciamento operativo.
+6. **Backup Atomico e Dashboard Streamlit:** Backup a caldo transazionale (API nativa SQLite) con archiviazione Parquet/BQL compresso e retention policy, affiancato da dashboard interattiva di gestione e monitoraggio a 4 Tab.
 
 ---
 
@@ -28,20 +29,22 @@ asset-allocator/
 │   ├── raw_bql_exports/      # Drop-zone per export storici BQL Bloomberg
 │   ├── db/
 │   │   └── quant_store.db    # Database SQLite (universo PiT, fondamentali, serie macro)
-│   └── parquet/              # Datalake Parquet partizionato per anno (serie Total Return EUR)
+│   ├── parquet/              # Datalake Parquet partizionato per anno (serie Total Return EUR)
+│   └── backups/              # Archivi compressi .zip di backup atomico SQLite e Parquet
 ├── src/
 │   └── quant_portfolio/
 │       ├── config.py         # Configurazione tipizzata Pydantic e parametri di sistema
 │       ├── cli.py            # Interfaccia a riga di comando (CLI) completa
-│       ├── storage/          # Schema SQLite e store Parquet idempotente con deduplicazione
+│       ├── storage/          # Schema SQLite, store Parquet e backup manager transazionale
 │       ├── ingestion/        # Generatore BQL, parser export, client FRED e xbbg delta
 │       ├── features/         # Pipeline 15 feature core e normalizzazione Z-score
 │       ├── alpha/            # Machine Learning, Purged CV e Stratified Sleeve Selector
 │       ├── risk/             # Multi-Day synchronizer, Marcenko-Pastur, HRP e Mean-CVaR
 │       ├── regime/           # Expanding HMM (NA/EU), Turbolenza Mahalanobis e Inertia Filter
 │       ├── hedging/          # Motore Dual-Sleeve Beta-Adjusted Futures Overlay
-│       └── backtest/         # Motore Walk-Forward, costi, buffer turnover e reporting
-└── tests/                    # Suite completa di 122 test unitari e di integrazione (mock Bloomberg)
+│       ├── backtest/         # Motore Walk-Forward, costi, buffer turnover e reporting
+│       └── dashboard/        # Dashboard interattiva Streamlit (4 Tab operativi e Plotly)
+└── tests/                    # Suite completa di 131 test unitari e di integrazione (mock Bloomberg)
 ```
 
 ---
@@ -160,6 +163,15 @@ uv run quant-portfolio backtest --start 2015-01-01 --end 2026-12-31 --capital 10
 uv run quant-portfolio rebalance --date 2026-10-16 --capital 10000000 --method hrp --holdings current_portfolio.csv --output orders.csv
 ```
 
+### 6. Backup Transazionale & Dashboard Streamlit
+```powershell
+# Esecuzione backup compresso atomico di SQLite DB e Parquet con rotazione
+uv run quant-portfolio backup --keep 10 --dest-dir G:\CONS_INV\RISK_MANAGEMENT\Backup\
+
+# Avvio dashboard interattiva Streamlit (4 Tab: Regime, Allocazione, Ribilanciamento, Backtest)
+uv run quant-portfolio dashboard --port 8501
+```
+
 ---
 
 ## Qualità del Codice e Testing
@@ -173,7 +185,7 @@ uv run ruff check --fix src tests && uv run ruff format src tests
 # Static type checking in modalità strict (nessun tipo implicito o Any non documentato)
 uv run mypy --strict src tests
 
-# Test suite completa (122 test deterministici, zero chiamate esterne di rete)
+# Test suite completa (131 test deterministici, zero chiamate esterne di rete)
 uv run pytest -v
 ```
 

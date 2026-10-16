@@ -67,6 +67,7 @@ class StoragePaths(BaseModel):
     raw_bql_dir: Path = Field(default_factory=lambda: Path("data/raw_bql_exports"))
     db_path: Path = Field(default_factory=lambda: Path("data/db/quant_store.db"))
     parquet_dir: Path = Field(default_factory=lambda: Path("data/parquet"))
+    backups_dir: Path = Field(default_factory=lambda: Path("data/backups"))
 
     def resolve_paths(self, base: Path | None = None) -> "StoragePaths":
         """Resolve all paths relative to a specified base directory."""
@@ -77,6 +78,7 @@ class StoragePaths(BaseModel):
             raw_bql_dir=(anchor / self.raw_bql_dir).resolve(),
             db_path=(anchor / self.db_path).resolve(),
             parquet_dir=(anchor / self.parquet_dir).resolve(),
+            backups_dir=(anchor / self.backups_dir).resolve(),
         )
 
 

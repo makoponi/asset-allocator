@@ -20,6 +20,8 @@ class RegimeFeatureBuilder:
         self.parquet_store = parquet_store
         self.config = config or PortfolioConfig()
         self.turb_engine = MahalanobisTurbulence(window=252, min_periods=63, shrinkage=0.01)
+        self._macro_cache: dict[RegionBloc, pd.DataFrame] = {}
+        self._turb_cache: dict[RegionBloc, pd.Series] = {}
 
     def load_macro_dataframe(
         self,
@@ -27,34 +29,28 @@ class RegimeFeatureBuilder:
         start_date: str | None = None,
         end_date: str | None = None,
     ) -> pd.DataFrame:
-        """Load raw macro series from SQLite and pivot into a wide daily DataFrame.
+        """Load raw macro series from SQLite and pivot into a wide daily DataFrame."""
+        if region_bloc not in self._macro_cache:
+            raw = self.store.get_macro_series(region_bloc=region_bloc)
+            if not raw.empty:
+                pivoted = raw.pivot(index="date", columns="series_id", values="value")
+                pivoted.index.name = "date"
+                self._macro_cache[region_bloc] = pivoted.sort_index()
+            else:
+                self._macro_cache[region_bloc] = pd.DataFrame()
 
-        Parameters
-        ----------
-        region_bloc : RegionBloc
-            'NA' or 'EU'.
-        start_date : str | None
-            Start date string (YYYY-MM-DD).
-        end_date : str | None
-            End date string (YYYY-MM-DD).
-
-        Returns
-        -------
-        pd.DataFrame
-            DataFrame indexed by date where columns are series_ids.
-        """
-        raw = self.store.get_macro_series(
-            start_date=start_date,
-            end_date=end_date,
-            region_bloc=region_bloc,
-        )
-        if raw.empty:
+        df = self._macro_cache[region_bloc]
+        if df.empty:
             return pd.DataFrame()
 
-        pivoted = raw.pivot(index="date", columns="series_id", values="value")
-        pivoted.index.name = "date"
-        pivoted = pivoted.sort_index()
-        return pivoted
+        if start_date is not None or end_date is not None:
+            mask = pd.Series(True, index=df.index)
+            if start_date is not None:
+                mask &= df.index >= start_date
+            if end_date is not None:
+                mask &= df.index <= end_date
+            return df[mask].copy()
+        return df.copy()
 
     def compute_turbulence_for_region(
         self,
@@ -62,46 +58,53 @@ class RegimeFeatureBuilder:
         start_date: str | None = None,
         end_date: str | None = None,
     ) -> pd.Series:
-        """Compute Mahalanobis turbulence for region using historical market returns.
+        """Compute Mahalanobis turbulence for region using historical market returns."""
+        if region_bloc not in self._turb_cache:
+            if self.parquet_store is None:
+                self._turb_cache[region_bloc] = pd.Series(dtype=float)
+            else:
+                market_df = self.parquet_store.read_daily_market(region_bloc=region_bloc)
+                if market_df.empty or "ticker" not in market_df.columns:
+                    self._turb_cache[region_bloc] = pd.Series(dtype=float)
+                else:
+                    tickers = market_df["ticker"].unique().tolist()
+                    meta = self.store.get_security_metadata_cache(tickers)
+                    ticker_to_sector = {
+                        t: info["gics_sector"]
+                        for t, info in meta.items()
+                        if info["gics_sector"] > 0
+                        and info["gics_sector"] != self.config.financials_gics_sector
+                    }
+                    if not ticker_to_sector:
+                        self._turb_cache[region_bloc] = pd.Series(dtype=float)
+                    else:
+                        px_wide = market_df.pivot(
+                            index="date", columns="ticker", values="px_last_eur"
+                        ).sort_index()
+                        px_wide = px_wide[[c for c in px_wide.columns if c in ticker_to_sector]]
+                        ret_wide = px_wide.pct_change(fill_method=None).dropna(how="all")
+                        sec_returns = MahalanobisTurbulence.aggregate_sector_returns(
+                            ret_wide, ticker_to_sector
+                        )
+                        if sec_returns.empty:
+                            self._turb_cache[region_bloc] = pd.Series(dtype=float)
+                        else:
+                            turb_series = self.turb_engine.compute_turbulence_series(sec_returns)
+                            turb_series.name = f"TURBULENCE_{region_bloc}"
+                            self._turb_cache[region_bloc] = turb_series
 
-        If ParquetMarketStore is available and returns are present, computes turbulence
-        over equal-weighted GICS sectors. Otherwise returns empty Series.
-        """
-        if self.parquet_store is None:
+        full_turb = self._turb_cache[region_bloc]
+        if full_turb.empty:
             return pd.Series(dtype=float)
 
-        market_df = self.parquet_store.read_daily_market(
-            start_date=start_date,
-            end_date=end_date,
-            region_bloc=region_bloc,
-        )
-        if market_df.empty or "ticker" not in market_df.columns:
-            return pd.Series(dtype=float)
-
-        # Retrieve sector metadata
-        tickers = market_df["ticker"].unique().tolist()
-        meta = self.store.get_security_metadata_cache(tickers)
-        ticker_to_sector = {
-            t: info["gics_sector"]
-            for t, info in meta.items()
-            if info["gics_sector"] > 0 and info["gics_sector"] != self.config.financials_gics_sector
-        }
-
-        if not ticker_to_sector:
-            return pd.Series(dtype=float)
-
-        # Build daily price matrix and compute returns
-        px_wide = market_df.pivot(index="date", columns="ticker", values="px_last_eur").sort_index()
-        px_wide = px_wide[[c for c in px_wide.columns if c in ticker_to_sector]]
-        ret_wide = px_wide.pct_change(fill_method=None).dropna(how="all")
-
-        sec_returns = MahalanobisTurbulence.aggregate_sector_returns(ret_wide, ticker_to_sector)
-        if sec_returns.empty:
-            return pd.Series(dtype=float)
-
-        turb_series = self.turb_engine.compute_turbulence_series(sec_returns)
-        turb_series.name = f"TURBULENCE_{region_bloc}"
-        return turb_series
+        if start_date is not None or end_date is not None:
+            mask = pd.Series(True, index=full_turb.index)
+            if start_date is not None:
+                mask &= full_turb.index >= start_date
+            if end_date is not None:
+                mask &= full_turb.index <= end_date
+            return full_turb[mask].copy()
+        return full_turb.copy()
 
     def build_regime_features(
         self,

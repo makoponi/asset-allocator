@@ -40,7 +40,11 @@ data/market_store.db*
 *.sqlite
 *.sqlite3
 *.parquet
+*.zip
 data/*.csv
+data/backups/
+data/backtest/
+codice_completo.txt
 
 # Testing & Coverage
 .coverage
