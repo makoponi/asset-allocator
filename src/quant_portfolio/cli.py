@@ -10,6 +10,13 @@ import numpy as np
 import pandas as pd
 
 from quant_portfolio.alpha.pipeline import AlphaPipeline
+from quant_portfolio.backtest.costs import TransactionCostModel
+from quant_portfolio.backtest.engine import WalkForwardBacktestEngine
+from quant_portfolio.backtest.report import (
+    export_report_to_dataframes,
+    format_performance_summary_table,
+)
+from quant_portfolio.backtest.turnover import TurnoverBufferFilter
 from quant_portfolio.config import ALL_CORE_FEATURES, VALID_REGION_BLOCS, PortfolioConfig
 from quant_portfolio.features.pipeline import TransatlanticFeaturePipeline
 from quant_portfolio.hedging.pipeline import RegimeHedgingPipeline
@@ -640,6 +647,177 @@ def cmd_fetch_universe(
             print(f"  {idx}: {count} records upserted")
 
 
+def cmd_backtest(
+    start_date: str = "2015-01-01",
+    end_date: str = "2026-12-31",
+    capital: float = 10_000_000.0,
+    method: str = "hrp",
+    rebalance_freq: int = 21,
+    enable_hedging: bool = True,
+    output_dir: str | None = None,
+) -> None:
+    """Run full Walk-Forward backtest simulation and output quantitative report."""
+    cfg = PortfolioConfig()
+    paths = cfg.paths.resolve_paths()
+    sqlite_store = SQLiteStore(paths.db_path)
+    parquet_store = ParquetMarketStore(paths.parquet_dir)
+
+    print("=== Quant Portfolio - Walk-Forward Simulation (2015 to Present) ===")
+    print(f"Date Range:              {start_date} to {end_date}")
+    print(f"Initial Capital:         EUR {capital:,.2f}")
+    print(f"Optimization Method:     {method.upper()}")
+    print(f"Rebalance Frequency:     Every {rebalance_freq} business days (Monthly)")
+    print(f"Dynamic Futures Hedging: {'ENABLED' if enable_hedging else 'DISABLED'}")
+
+    engine = WalkForwardBacktestEngine(
+        sqlite_store=sqlite_store,
+        parquet_store=parquet_store,
+        config=cfg,
+    )
+
+    daily_df, report, rebal_df = engine.run_backtest(
+        start_date=start_date,
+        end_date=end_date,
+        allocation_method=cast("AllocationMethod", method),
+        initial_capital_eur=capital,
+        enable_hedging=enable_hedging,
+        rebalance_freq_days=rebalance_freq,
+    )
+
+    summary_table = format_performance_summary_table(report)
+    print("\n" + summary_table)
+
+    if output_dir:
+        out_p = Path(output_dir)
+        out_p.mkdir(parents=True, exist_ok=True)
+        dfs = export_report_to_dataframes(report, daily_history_df=daily_df)
+        dfs["summary"].to_csv(out_p / "backtest_summary.csv", index=False)
+        dfs["attribution"].to_csv(out_p / "hedging_attribution.csv", index=False)
+        dfs["sleeves"].to_csv(out_p / "sleeve_metrics.csv", index=False)
+        daily_df.to_csv(out_p / "portfolio_daily_history.csv", index=False)
+        rebal_df.to_csv(out_p / "rebalance_log.csv", index=False)
+        print(f"\n[Done] Backtest artifacts exported to: {out_p.resolve()}")
+
+
+def cmd_rebalance(
+    as_of_date: str,
+    capital: float = 10_000_000.0,
+    method: str = "hrp",
+    holdings_file: str | None = None,
+    output_path: str | None = None,
+    eur_usd_rate: float = 1.08,
+) -> None:
+    """Generate production rebalance orders and futures overlay for as_of_date."""
+    cfg = PortfolioConfig()
+    paths = cfg.paths.resolve_paths()
+    sqlite_store = SQLiteStore(paths.db_path)
+    parquet_store = ParquetMarketStore(paths.parquet_dir)
+
+    print(f"=== Quant Portfolio - Monthly Rebalance & Production Orders ({as_of_date}) ===")
+    print(f"Portfolio Capital: EUR {capital:,.2f}")
+    print(f"Optimizer:         {method.upper()}")
+
+    # 1. Load current holdings if provided
+    current_weights_df = pd.DataFrame(columns=["ticker", "weight", "region_bloc"])
+    current_held_tickers: list[str] = []
+    if holdings_file:
+        h_path = Path(holdings_file)
+        if h_path.exists():
+            if h_path.suffix.lower() == ".parquet":
+                current_weights_df = pd.read_parquet(h_path)
+            else:
+                current_weights_df = pd.read_csv(h_path, keep_default_na=False)
+                if "region_bloc" in current_weights_df.columns:
+                    current_weights_df["region_bloc"] = (
+                        current_weights_df["region_bloc"].replace("", "NA").fillna("NA")
+                    )
+            current_held_tickers = current_weights_df["ticker"].tolist()
+            print(f"Current Holdings Loaded: {len(current_held_tickers)} assets")
+
+    # 2. Score and Rank Active Universe
+    alpha_pipe = AlphaPipeline(
+        config=cfg,
+        sqlite_store=sqlite_store,
+        parquet_store=parquet_store,
+    )
+    ranked_univ = alpha_pipe.rank_and_select_at_date(as_of_date=as_of_date)
+
+    # 3. Apply Turnover Buffer (Hold decile <= 3)
+    tb_filter = TurnoverBufferFilter(config=cfg)
+    candidates = tb_filter.filter_candidates_with_buffer(
+        ranked_universe=ranked_univ,
+        current_holdings=current_held_tickers,
+    )
+
+    # 4. Optimal Allocation
+    alloc_pipe = PortfolioAllocationPipeline(parquet_store=parquet_store, config=cfg)
+    target_weights_df, risk_summary = alloc_pipe.allocate_candidates(
+        candidates_df=candidates,
+        as_of_date=as_of_date,
+        method=cast("AllocationMethod", method),
+    )
+
+    # 5. Delta Orders
+    delta_orders_df = tb_filter.generate_delta_orders(
+        current_weights=current_weights_df,
+        target_weights=target_weights_df,
+        portfolio_value_eur=capital,
+    )
+
+    # 6. Cost Estimation
+    cost_model = TransactionCostModel(config=cfg)
+    eq_cost, _ = cost_model.calculate_equity_costs(delta_orders_df, portfolio_value_eur=capital)
+
+    # 7. Futures Hedging Plan
+    hedge_pipe = RegimeHedgingPipeline(
+        sqlite_store=sqlite_store,
+        parquet_store=parquet_store,
+        config=cfg,
+    )
+    hedge_summary = hedge_pipe.execute_hedging_pipeline(
+        as_of_date=as_of_date,
+        portfolio_value_eur=capital,
+        allocations_df=target_weights_df,
+        eur_usd_rate=eur_usd_rate,
+    )
+
+    print("\n--- Allocation & Risk Summary ---")
+    print(
+        f"Total Invested Assets:  {risk_summary.n_stocks} "
+        f"(NA: {risk_summary.n_na}, EU: {risk_summary.n_eu})"
+    )
+    print(
+        f"Sleeve Weights:         NA = {risk_summary.na_weight * 100:.1f}%, "
+        f"EU = {risk_summary.eu_weight * 100:.1f}%"
+    )
+    print(f"Portfolio Annual Vol:   {risk_summary.annualized_volatility * 100:.2f}%")
+    print(f"Estimated Trade Costs:  EUR {eq_cost:,.2f}")
+
+    print("\n--- Futures Hedging Execution Overlay ---")
+    na_sym = hedge_summary.na_sleeve.contract_symbol
+    na_qty = hedge_summary.na_sleeve.contracts_rounded
+    na_not = hedge_summary.na_sleeve.hedged_notional_eur
+    eu_sym = hedge_summary.eu_sleeve.contract_symbol
+    eu_qty = hedge_summary.eu_sleeve.contracts_rounded
+    eu_not = hedge_summary.eu_sleeve.hedged_notional_eur
+
+    print(f"NA Overlay ({na_sym}):  Sell {na_qty} contracts (Notional: EUR {na_not:,.0f})")
+    print(f"EU Overlay ({eu_sym}):  Sell {eu_qty} contracts (Notional: EUR {eu_not:,.0f})")
+
+    buys = delta_orders_df[delta_orders_df["action"] == "BUY"]
+    sells = delta_orders_df[delta_orders_df["action"] == "SELL"]
+    print(f"\n--- Order Execution Summary: {len(buys)} BUYs, {len(sells)} SELLs ---")
+
+    if output_path:
+        out_p = Path(output_path)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        if out_p.suffix.lower() == ".parquet":
+            delta_orders_df.to_parquet(out_p, index=False)
+        else:
+            delta_orders_df.to_csv(out_p, index=False)
+        print(f"[Done] Exported rebalance orders to: {out_p.resolve()}")
+
+
 def main() -> None:
     """Main CLI entrypoint."""
     parser = argparse.ArgumentParser(description="Quant Portfolio Ingestion and Management CLI")
@@ -787,6 +965,61 @@ def main() -> None:
         "--eur-usd", type=float, default=1.08, help="EUR/USD exchange rate (default: 1.08)"
     )
 
+    # backtest
+    p_bt = subparsers.add_parser(
+        "backtest", help="Run transatlantic Walk-Forward backtest simulation (2015 to present)"
+    )
+    p_bt.add_argument("--start", "-s", default="2015-01-01", help="Start date (YYYY-MM-DD)")
+    p_bt.add_argument("--end", "-e", default="2026-12-31", help="End date (YYYY-MM-DD)")
+    p_bt.add_argument(
+        "--capital", "-c", type=float, default=10_000_000.0, help="Initial capital in EUR"
+    )
+    p_bt.add_argument(
+        "--method",
+        "-m",
+        choices=["hrp", "cvar", "ensemble"],
+        default="hrp",
+        help="Optimizer (default: hrp)",
+    )
+    p_bt.add_argument(
+        "--rebalance-freq",
+        "-f",
+        type=int,
+        default=21,
+        help="Rebalance frequency in business days (default: 21)",
+    )
+    p_bt.add_argument(
+        "--no-hedge", action="store_true", help="Disable dynamic futures overlay hedging"
+    )
+    p_bt.add_argument(
+        "--output-dir", "-o", help="Optional output directory to export CSV artifacts"
+    )
+
+    # rebalance
+    p_reb = subparsers.add_parser(
+        "rebalance", help="Generate production delta orders and futures hedging overlay"
+    )
+    p_reb.add_argument("--date", required=True, help="As of date (YYYY-MM-DD)")
+    p_reb.add_argument(
+        "--capital", "-c", type=float, default=10_000_000.0, help="Portfolio capital in EUR"
+    )
+    p_reb.add_argument(
+        "--method",
+        "-m",
+        choices=["hrp", "cvar", "ensemble"],
+        default="hrp",
+        help="Optimizer (default: hrp)",
+    )
+    p_reb.add_argument(
+        "--holdings", "-H", help="Optional path to current portfolio holdings (.csv or .parquet)"
+    )
+    p_reb.add_argument(
+        "--output", "-o", help="Optional output path for delta orders (.csv or .parquet)"
+    )
+    p_reb.add_argument(
+        "--eur-usd", type=float, default=1.08, help="EUR/USD exchange rate (default: 1.08)"
+    )
+
     # fetch-macro
     p_fm = subparsers.add_parser(
         "fetch-macro", help="Download macroeconomic and credit spread series from FRED into SQLite"
@@ -869,6 +1102,25 @@ def main() -> None:
             output_path=args.output,
             na_future=args.na_future,
             eu_future=args.eu_future,
+            eur_usd_rate=args.eur_usd,
+        )
+    elif args.command == "backtest":
+        cmd_backtest(
+            start_date=args.start,
+            end_date=args.end,
+            capital=args.capital,
+            method=args.method,
+            rebalance_freq=args.rebalance_freq,
+            enable_hedging=not args.no_hedge,
+            output_dir=args.output_dir,
+        )
+    elif args.command == "rebalance":
+        cmd_rebalance(
+            as_of_date=args.date,
+            capital=args.capital,
+            method=args.method,
+            holdings_file=args.holdings,
+            output_path=args.output,
             eur_usd_rate=args.eur_usd,
         )
     elif args.command == "fetch-macro":

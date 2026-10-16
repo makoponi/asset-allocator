@@ -175,6 +175,20 @@ class RiskConfig(BaseModel):
     default_optimizer: Literal["hrp", "cvar", "ensemble"] = Field(default="hrp")
 
 
+class BacktestConfig(BaseModel):
+    """Configuration for Walk-Forward simulation, transaction costs, and turnover."""
+
+    initial_capital_eur: float = Field(default=10_000_000.0, gt=0.0)
+    cost_bps_na_equity: float = Field(default=5.0, ge=0.0)
+    cost_bps_eu_equity: float = Field(default=10.0, ge=0.0)
+    cost_bps_futures: float = Field(default=1.5, ge=0.0)
+    turnover_buffer_decile_max: int = Field(default=3, ge=1, le=10)
+    rebalance_freq_days: int = Field(default=21, ge=1)
+    futures_rebalance_daily: bool = Field(default=True)
+    annualization_days: int = Field(default=252, ge=200, le=365)
+    risk_free_rate: float = Field(default=0.0, ge=-0.05, le=0.20)
+
+
 class PortfolioConfig(BaseModel):
     """Global system configuration."""
 
@@ -186,3 +200,4 @@ class PortfolioConfig(BaseModel):
     features: FeatureConfig = Field(default_factory=FeatureConfig)
     alpha: AlphaConfig = Field(default_factory=AlphaConfig)
     risk: RiskConfig = Field(default_factory=RiskConfig)
+    backtest: BacktestConfig = Field(default_factory=BacktestConfig)

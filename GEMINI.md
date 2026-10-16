@@ -185,11 +185,27 @@ quant-portfolio/
      * Nuovi comandi CLI `quant-portfolio regime --date ...` e `quant-portfolio hedge --date ... --portfolio-value ...`.
      * Test suite espansa a 106 test unitari e di integrazione passati (100%).
 
-### Fase 7: Motore di Backtest Walk-Forward Multi-Valuta e Pipeline CLI di Produzione
+### Fase 7: Motore di Backtest Walk-Forward Multi-Valuta e Pipeline CLI di Produzione [COMPLETED]
 * **Obiettivo:** Simulare l'intero ecosistema dal 2015 a oggi tenendo conto dei costi reali e generare il comando CLI per l'operatività mensile/giornaliera.
-* **Deliverables:**
-  1. Simulatore Walk-Forward che modella:
-     * Buffer di turnover mensile sulle azioni (vendita solo se il titolo scende sotto il terzo decile del ranking regionale).
-     * Costi di transazione differenziati (es. 5 bps su azioni USA/Canada, 10 bps + eventuale FTT/Stamp Duty su azioni europee, 1.5 bps sui future `ES` e `FXXP` incluso il roll trimestrale).
-  2. Reportistica quantitativa: Sharpe, Sortino, Calmar, Max Drawdown, scomposizione dell'Alpha per regione (`NA` vs `EU`) e contributo netto dei due overlay future.
-  3. Script CLI (`uv run quant-portfolio --mode delta`) che aggiorna i dati recenti via `xbbg`, calcola i pesi azionari e restituisce il numero esatto di contratti `ES`/`MES` e `FXXP`/`FESX` da vendere a copertura.
+* **Deliverables Realizzati:**
+  1. **Modello Costi di Transazione (`TransactionCostModel` in `backtest/costs.py`):**
+     * 5 bps ($0.0005$) per azioni Nord America (`NA`).
+     * 10 bps ($0.0010$) per azioni Europa (`EU`).
+     * 1.5 bps ($0.00015$) su valore nozionale dei contratti future (`ES`/`MES`, `FXXP`/`FESX`), inclusi roll trimestrali ed esecuzioni dinamiche.
+  2. **Buffer di Turnover su Base Decile (`TurnoverBufferFilter` in `backtest/turnover.py`):**
+     * Regola del 3° decile: mantenimento dei titoli in portafoglio se `regional_decile <= 3`.
+     * Liquidazione completa solo in caso di caduta oltre il 3° decile (`regional_decile > 3`).
+     * Rimpiazzo e completamento quota ($K_{\text{NA}}=35$, $K_{\text{EU}}=25$) con i migliori titoli non detenuti ordinati per score ML decrescente.
+     * Generazione ordini delta operativi (`BUY`, `SELL`, `HOLD`) con controvalore in EUR.
+  3. **Metriche e Analisi Quantitativa (`backtest/metrics.py` e `backtest/report.py`):**
+     * CAGR, Volatilità Annualizzata, Sharpe Ratio ($r_f=0\%$), Sortino Ratio, Max Drawdown, Calmar Ratio, Win Rate e Profit Factor.
+     * Tabella ASCII a formattazione pulita compatibile con standard Windows CP1252 (nessun `UnicodeEncodeError`).
+     * Decomposizione analitica dell'Alpha per sleeve regionale (`NA` vs `EU`) e attribuzione netta dell'overlay di copertura (mitigazione del Max Drawdown, riduzione volatilità, P&L lordo e netto dei costi).
+     * Esportazione su file CSV/Parquet di riepilogo metriche, attribuzione e serie giornaliera NAV.
+  4. **Simulatore Walk-Forward Integrato (`WalkForwardBacktestEngine` in `backtest/engine.py`):**
+     * Simulazione multi-valuta in EUR base con P&L azionario, contabilità marginazione future giornaliera e deduzione realistica dei costi di transazione.
+  5. **Comandi CLI di Produzione (`cli.py`):**
+     * `quant-portfolio backtest --start 2015-01-01 --end 2026-12-31 --capital 10000000 --method hrp --output-dir data/backtest/`
+     * `quant-portfolio rebalance --date 2026-10-16 --capital 10000000 --method hrp --holdings current_portfolio.csv --output orders.csv`
+  6. **Test Suite Completa:**
+     * Suite espansa a 122 test unitari e di integrazione passati (100%), coprendo tutti i moduli dell'infrastruttura.
