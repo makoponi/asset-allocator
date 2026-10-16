@@ -97,12 +97,38 @@ class AllocationConstraints(BaseModel):
     eu_top_stocks: int = Field(default=25, ge=1)
 
 
+MACRO_SERIES_NA: tuple[str, ...] = ("VIX", "BAMLH0A0HYM2", "T10Y2Y", "TURBULENCE_NA")
+MACRO_SERIES_EU: tuple[str, ...] = ("V2TX", "BAMLHE00EHYIOAS", "BUND10Y2Y", "TURBULENCE_EU")
+
+FUTURE_MULTIPLIERS: dict[str, float] = {
+    "ES": 50.0,
+    "MES": 5.0,
+    "FXXP": 50.0,
+    "FESX": 10.0,
+}
+
+FUTURE_CURRENCIES: dict[str, str] = {
+    "ES": "USD",
+    "MES": "USD",
+    "FXXP": "EUR",
+    "FESX": "EUR",
+}
+
+
 class RegimeHedgingConfig(BaseModel):
     """Parameters for dual-sleeve HMM regime sensors and futures overlay."""
 
+    n_states: int = Field(default=3, ge=2, le=5)
+    covariance_type: str = Field(default="diag")
+    min_history_days: int = Field(default=126, ge=63)
+    recalibration_freq_days: int = Field(default=21, ge=1)
     inertia_days: int = Field(default=3, ge=1)
     stress_open_prob: float = Field(default=0.70, ge=0.0, le=1.0)
     stress_close_prob: float = Field(default=0.40, ge=0.0, le=1.0)
+    default_na_future: str = Field(default="ES")
+    default_eu_future: str = Field(default="FXXP")
+    macro_series_na: tuple[str, ...] = MACRO_SERIES_NA
+    macro_series_eu: tuple[str, ...] = MACRO_SERIES_EU
     hedge_ratios: dict[int, float] = Field(
         default_factory=lambda: {
             0: 0.0,  # Calm: 0% hedge

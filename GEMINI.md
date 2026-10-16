@@ -39,9 +39,10 @@ Per garantire la massima precisione matematica ed evitare allucinazioni struttur
 ## 3. Regole Auree di Ingegneria Finanziaria Transatlantica (Anti-Bias)
 Gli agenti devono implementare controlli assertivi (`assert` o eccezioni custom) nel codice per prevenire i seguenti 6 errori metodologici:
 
-1. **Valuta Base Unificata (EUR Base) e Deduplicazione Cross-Listing:**
+1. **Valuta Base Unificata (EUR Base), Deduplicazione e Integrità Blocco 'NA':**
    * L'universo copre titoli quotati in EUR, USD, CAD, GBP, CHF, SEK, DKK, NOK. Tutti i prezzi, i volumi e gli indici Total Return (`TOT_RETURN_INDEX_GROSS_DVDS`) devono essere convertiti in **EUR** alla data di riferimento.
    * Eventuali società con doppia quotazione tra indici (es. quotate sia a Toronto/New York che a Londra/Francoforte) devono essere deduplicate tramite identificativo globale (`FIGI` / `ISIN`), mantenendo la linea di quotazione più liquida.
+   * *Integrità Blocco 'NA' (Anti-NaN Trap in Pandas):* Nel caricamento di file CSV contenenti la colonna `region_bloc`, `pandas.read_csv()` interpreta per default la stringa `'NA'` (Nord America) come valore nullo (`NaN`). Specificare sempre `keep_default_na=False` e ripristinare il blocco (`df['region_bloc'].replace('', 'NA').fillna('NA')`), oppure privilegiare sistematicamente file binari **Parquet**.
 2. **Sincronizzazione dei Fusi Orari per la Covarianza (3-Day / Weekly Returns):**
    * Le borse europee chiudono alle 17:30 CET, quelle nordamericane alle 22:00 CET. Calcolare la matrice di covarianza su rendimenti giornalieri *Close-to-Close* sottostima gravemente la correlazione tra USA ed Europa.
    * Il modulo di rischio (Marcenko-Pastur e HRP) deve operare obbligatoriamente su **rendimenti a 3 giorni lavorativi non sovrapposti (o rendimenti settimanali Friday-to-Friday)** in EUR.
@@ -51,11 +52,18 @@ Gli agenti devono implementare controlli assertivi (`assert` o eccezioni custom)
    * Banche, assicurazioni e financial services presentano bilanci incompatibili con multipli industriali (`EV/EBITDA`, `Gross Margin`, `Accruals`). Il settore GICS `40` deve essere filtrato a monte dall'universo investibile in entrambe le regioni.
 5. **Zero Look-Ahead Bias nei Fondamentali e nei Sensori HMM:**
    * *Fondamentali:* Nello split temporale al tempo $t$, sono interrogabili solo i record con `filing_date <= t`.
-   * *HMM:* È severamente vietato fare `.fit()` dell'Hidden Markov Model sull'intera serie storica. L'addestramento deve avvenire in **Expanding Window** (ricalibrazione mensile usando solo dati fino a $t$) e la probabilità di stato in $t$ deve essere calcolata tramite *forward filtering* puro, mai tramite algoritmo di Viterbi sull'intero campione.
-6. **Ponte Bloomberg Ibrido Realistico:**
+   * *HMM:* È severamente vietato fare `.fit()` dell'Hidden Markov Model sull'intera serie storica. L'addestramento deve avvenire in **Expanding Window** (ricalibrazione mensile usando solo dati fino a $t$) e la probabilità di stato in $t$ deve essere calcolata tramite *forward filtering* puro in log-space (`_compute_log_likelihood(X)` + `logsumexp`), mai tramite algoritmo di Viterbi o posterior smoothing sull'intero campione.
+   * *Anti-Label Switching & Vincolo Covars 'diag' in hmmlearn:* Nel riordinamento degli stati post-fit per volatilità crescente (Stato 0: Calm, Stato 1: Alert, Stato 2: Severe Stress), tenere presente che in `hmmlearn` con `covariance_type='diag'` il getter `model.covars_` restituisce una matrice 3D `(n_components, n_dim, n_dim)`, mentre il setter accetta esclusivamente un array 2D `(n_components, n_dim)`. Estrarre sempre la diagonale prima della riassegnazione:
+     ```python
+     diag_covars = np.diagonal(model.covars_, axis1=1, axis2=2)
+     model.covars_ = diag_covars[perm]
+     ```
+   * *Soglia Storica Minima HMM (126 Giorni):* La soglia minima di giorni storici per addestrare l'HMM espansivo (`min_history_days`) è impostata a 126 giorni lavorativi (6 mesi di borsa) per accogliere serie macro con storico recente mantenendo stabilità numerica nei 3 stati.
+6. **Ponte Bloomberg Ibrido Realistico & Ingestione FRED Macro:**
    * L'API Python `blpapi` desktop non espone nativamente BQL fuori dall'ambiente BQuant. L'ingestione massiva storica BQL viene gestita tramite loader dedicati da export BQL/Excel (`data/raw_bql_exports/*.parquet` o `.csv`) verso SQLite, mentre gli aggiornamenti delta usano `xbbg` (`bdp`/`bdh`) con caching idempotente rigoroso.
    * Nelle interrogazioni storiche `bdh`, assicurare sempre l'append del suffisso `Equity` (es. `f"{t} Equity"`) in input e il recupero pulito in output per prevenire errori `BAD_SEC` del DAPI.
    * Tutti i download massivi di serie giornaliere devono eseguire il checkpointing immediato batch-by-batch su Parquet con supporto a `--skip-existing`.
+   * *Protezione Quote DAPI & Macro Series via FRED:* Per prevenire blocchi di quota (`LIMIT - WORKFLOW_REVIEW_NEEDED`) sul terminale, le serie macro storiche (`VIX`, US HY OAS `BAMLH0A0HYM2`, Curva Treasury `T10Y2Y`, Euro HY OAS `BAMLHE00EHYIOAS`, Curva Bund) devono essere alimentate tramite il downloader FRED (`fetch-macro`) via `pd.read_csv(url)` a consumo zero di securities count Bloomberg.
 
 ---
 
@@ -152,22 +160,30 @@ quant-portfolio/
      * Modulo `PortfolioAllocationPipeline` e comando `quant-portfolio allocate` per calcolo allocazione, volatilità annualizzata 3d, CVaR ed MCTR.
      * Test suite estesa a 89 test unitari e di integrazione passati (100%).
 
-### Fase 6: Doppio Sensore di Regime (NA + EU) e Dual-Sleeve Beta-Adjusted Hedging
+### Fase 6: Doppio Sensore di Regime (NA + EU) e Dual-Sleeve Beta-Adjusted Hedging [COMPLETED]
 * **Obiettivo:** Proteggere indipendentemente la componente Nord Americana e la componente Europea del portafoglio tramite i rispettivi contratti future su indici.
-* **Input Macro Regionali (da FRED / Bloomberg, scaricati con caching):**
-  * *Blocco `NA`:* `VIX Index`, US High Yield OAS (`BAMLH0A0HYM2`), Curva US Treasury 10Y-2Y (`T10Y2Y`), Turbolenza di Mahalanobis sui settori S&P 500.
-  * *Blocco `EU`:* `V2TX Index` (Euro Stoxx 50 Volatility), EUR High Yield OAS (`BAMLHE00EHYIOAS`), Curva Bund 10Y-2Y, Turbolenza di Mahalanobis sui settori STOXX 600.
-* **Deliverables:**
-  1. Modulo `DualExpandingRegimeDetector`:
-     * Due istanze Gaussian HMM a 3 stati addestrate in finestra espansiva (una per `NA`, una per `EU`) con ordinamento automatico degli stati per volatilità crescente (anti-*label switching*).
-  2. Calcolo del **Dual-Sleeve Beta-Adjusted Hedge Ratio**:
-     * Calcolo separato del valore di mercato e del beta ex-ante per le due maniche del portafoglio:
-       $$\beta_{\text{Sleeve NA}, t} = \sum_{i \in \text{NA}} w_{i,t}^{\text{rel}} \beta_{i, \text{SPX}}, \quad \beta_{\text{Sleeve EU}, t} = \sum_{j \in \text{EU}} w_{j,t}^{\text{rel}} \beta_{j, \text{SXXP}}$$
-     * Strumenti di copertura: Future **E-mini / Micro E-mini S&P 500 (`ES` / `MES`)** convertito al tasso di cambio EUR/USD corrente per la Sleeve `NA`; Future **STOXX Europe 600 (`FXXP`) o Euro Stoxx 50 (`FESX`)** per la Sleeve `EU`.
-     * Regola di attivazione indipendente per ciascuna regione con **Banda di Inerzia a 3 giorni** (conferma di 3 chiusure consecutive sopra soglia 70% per aprire, sotto 40% per chiudere):
-       * *Stato 0 (Calmo):* Copertura regionale = $0\%$.
-       * *Stato 1 (Transizione/Allerta):* Copertura regionale = $50\% \times \beta_{\text{Sleeve}}$.
-       * *Stato 2 (Stress Severo):* Copertura regionale = $100\% \times \beta_{\text{Sleeve}}$.
+* **Input Macro Regionali (da FRED / Bloomberg / SQLite):**
+  * *Blocco `NA`:* `VIX Index`, US High Yield OAS (`BAMLH0A0HYM2`), Curva US Treasury 10Y-2Y (`T10Y2Y`), Turbolenza di Mahalanobis sui settori S&P 500 (`TURBULENCE_NA`).
+  * *Blocco `EU`:* `V2TX Index` (Euro Stoxx 50 Volatility), EUR High Yield OAS (`BAMLHE00EHYIOAS`), Curva Bund 10Y-2Y, Turbolenza di Mahalanobis sui settori STOXX 600 (`TURBULENCE_EU`).
+* **Deliverables Realizzati:**
+  1. **Turbolenza Finanziaria di Mahalanobis (`MahalanobisTurbulence`):**
+     * Calcolo della turbolenza sui rendimenti settoriali ex-lookahead bias ($d_t^2 = (y_t - \mu_{t-1})^T \boldsymbol{\Sigma}_{t-1}^{-1} (y_t - \mu_{t-1})$) con regolarizzazione e shrinkage di covarianza.
+     * Aggregazione automatica dei rendimenti di settore a partire dai singoli titoli e GICS sector.
+  2. **Feature Builder e Allineamento Macro (`RegimeFeatureBuilder`):**
+     * Caricamento e allineamento calendario per festività disallineate USA/EU con forward-fill limitato a max 3 giorni.
+  3. **Gaussian HMM Espansivo con Anti-Label Switching (`ExpandingGaussianHMM` & `DualExpandingRegimeDetector`):**
+     * Addestramento a 3 stati su finestra espansiva e riordinamento deterministico degli stati $\{0, 1, 2\}$ post-fit per stress/volatilità attesa crescente (Stato 0: Calm, Stato 1: Alert, Stato 2: Severe Stress).
+     * Calcolo delle probabilità di stato al tempo $t$ tramite **Forward Filtering puro** in log-space (senza look-ahead né backward Viterbi smoothing).
+  4. **Filtro di Persistenza a Banda di Inerzia (`InertiaBandFilter`):**
+     * Histeresi a 3 giorni: apertura/escalation a $P \ge 70\%$ confermata per 3 giorni consecutivi; de-escalation a $P < 40\%$ confermata per 3 giorni consecutivi per eliminare il whipsaw operativo.
+  5. **Motore Dual-Sleeve Beta-Adjusted Hedging (`DualSleeveHedgeEngine`):**
+     * Calcolo del beta ex-ante ponderato per ciascuna sleeve ($\beta_{\text{NA}}$ vs SPX, $\beta_{\text{EU}}$ vs SXXP).
+     * Applicazione dell'hedge ratio: 0% (Stato 0), $50\% \times \beta$ (Stato 1), $100\% \times \beta$ (Stato 2).
+     * Dimensionamento contratti future (`ES`/`MES` con conversione EUR/USD spot; `FXXP`/`FESX` in EUR) e arrotondamento ad intero.
+  6. **Pipeline Unificata e Interfaccia CLI (`regime` e `hedge`):**
+     * `RegimeHedgingPipeline` integrata end-to-end.
+     * Nuovi comandi CLI `quant-portfolio regime --date ...` e `quant-portfolio hedge --date ... --portfolio-value ...`.
+     * Test suite espansa a 106 test unitari e di integrazione passati (100%).
 
 ### Fase 7: Motore di Backtest Walk-Forward Multi-Valuta e Pipeline CLI di Produzione
 * **Obiettivo:** Simulare l'intero ecosistema dal 2015 a oggi tenendo conto dei costi reali e generare il comando CLI per l'operatività mensile/giornaliera.

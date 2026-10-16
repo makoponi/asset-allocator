@@ -10,13 +10,15 @@ import numpy as np
 import pandas as pd
 
 from quant_portfolio.alpha.pipeline import AlphaPipeline
-from quant_portfolio.config import ALL_CORE_FEATURES, PortfolioConfig
+from quant_portfolio.config import ALL_CORE_FEATURES, VALID_REGION_BLOCS, PortfolioConfig
 from quant_portfolio.features.pipeline import TransatlanticFeaturePipeline
+from quant_portfolio.hedging.pipeline import RegimeHedgingPipeline
 from quant_portfolio.ingestion.bql_parser import BQLFundamentalsIngestionEngine
 from quant_portfolio.ingestion.bql_templates import (
     CORE_UNIVERSE_INDICES,
     BQLQueryGenerator,
 )
+from quant_portfolio.ingestion.fred_macro import FREDMacroDownloader
 from quant_portfolio.ingestion.pipeline import TransatlanticIngestionPipeline
 from quant_portfolio.ingestion.xbbg_fundamentals import BloombergFundamentalsDownloader
 from quant_portfolio.risk.pipeline import AllocationMethod, PortfolioAllocationPipeline
@@ -346,7 +348,9 @@ def cmd_allocate(
         if c_path.suffix.lower() == ".parquet":
             candidates = pd.read_parquet(c_path)
         else:
-            candidates = pd.read_csv(c_path)
+            candidates = pd.read_csv(c_path, keep_default_na=False)
+            if "region_bloc" in candidates.columns:
+                candidates["region_bloc"] = candidates["region_bloc"].replace("", "NA").fillna("NA")
         print(f"Loaded {len(candidates)} candidates from: {c_path.name}")
     else:
         sqlite_store = SQLiteStore(paths.db_path)
@@ -414,6 +418,155 @@ def cmd_allocate(
         else:
             alloc_df.to_csv(out_p, index=False)
         print(f"\n[Done] Saved allocations to: {out_p.resolve()}")
+
+
+def cmd_regime(as_of_date: str) -> None:
+    """Detect market regimes and 3-day inertia filtered states for NA and EU."""
+    cfg = PortfolioConfig()
+    paths = cfg.paths.resolve_paths()
+    sqlite_store = SQLiteStore(paths.db_path)
+    parquet_store = ParquetMarketStore(paths.parquet_dir)
+
+    pipe = RegimeHedgingPipeline(
+        sqlite_store=sqlite_store,
+        parquet_store=parquet_store,
+        config=cfg,
+    )
+
+    print(f"=== Quant Portfolio - Transatlantic Regime Sensors ({as_of_date}) ===")
+    raw_results, filtered_states = pipe.detect_and_filter_regimes(as_of_date=as_of_date)
+    state_names = {0: "Calm", 1: "Alert", 2: "Severe Stress"}
+
+    for bloc in VALID_REGION_BLOCS:
+        res = raw_results[bloc]
+        filt_s = filtered_states[bloc]
+        print(f"\n[{bloc} Sleeve]")
+        print(f"  Raw HMM State:       {res.state} ({res.state_name})")
+        print(f"  Filtered State (3d): {filt_s} ({state_names.get(filt_s, 'Unknown')})")
+        print(
+            f"  Probabilities:       Calm: {res.prob_calm * 100:5.1f}% | "
+            f"Alert: {res.prob_alert * 100:5.1f}% | "
+            f"Stress: {res.prob_stress * 100:5.1f}%"
+        )
+
+
+def cmd_hedge(
+    as_of_date: str,
+    portfolio_value: float,
+    allocations_file: str | None = None,
+    output_path: str | None = None,
+    na_future: str | None = None,
+    eu_future: str | None = None,
+    eur_usd_rate: float = 1.08,
+) -> None:
+    """Calculate dual-sleeve beta-adjusted futures overlay and sizing."""
+    cfg = PortfolioConfig()
+    paths = cfg.paths.resolve_paths()
+    sqlite_store = SQLiteStore(paths.db_path)
+    parquet_store = ParquetMarketStore(paths.parquet_dir)
+
+    print(f"=== Quant Portfolio - Dual-Sleeve Futures Hedging ({as_of_date}) ===")
+    print(f"Total Portfolio Capital: EUR {portfolio_value:,.2f}")
+
+    # 1. Load or calculate allocations
+    if allocations_file:
+        c_path = Path(allocations_file)
+        if not c_path.exists():
+            print(f"[ERROR] Allocations file not found: {c_path}")
+            sys.exit(1)
+        if c_path.suffix.lower() == ".parquet":
+            alloc_df = pd.read_parquet(c_path)
+        else:
+            alloc_df = pd.read_csv(c_path, keep_default_na=False)
+            if "region_bloc" in alloc_df.columns:
+                alloc_df["region_bloc"] = alloc_df["region_bloc"].replace("", "NA").fillna("NA")
+        print(f"Loaded {len(alloc_df)} portfolio holdings from: {c_path.name}")
+    else:
+        print("[!] No allocations file provided. Generating HRP allocations...")
+        alloc_pipe = PortfolioAllocationPipeline(parquet_store=parquet_store, config=cfg)
+        alpha_pipe = AlphaPipeline(
+            config=cfg,
+            sqlite_store=sqlite_store,
+            parquet_store=parquet_store,
+        )
+        candidates = alpha_pipe.rank_and_select_at_date(as_of_date=as_of_date)
+        alloc_df, _ = alloc_pipe.allocate_candidates(
+            candidates_df=candidates,
+            as_of_date=as_of_date,
+            method="hrp",
+        )
+
+    if alloc_df.empty:
+        print("[!] Cannot compute hedging plan: portfolio allocation is empty.")
+        return
+
+    # 2. Execute pipeline
+    hedge_pipe = RegimeHedgingPipeline(
+        sqlite_store=sqlite_store,
+        parquet_store=parquet_store,
+        config=cfg,
+    )
+
+    summary = hedge_pipe.execute_hedging_pipeline(
+        as_of_date=as_of_date,
+        portfolio_value_eur=portfolio_value,
+        allocations_df=alloc_df,
+        eur_usd_rate=eur_usd_rate,
+        custom_na_future=na_future,
+        custom_eu_future=eu_future,
+    )
+
+    # 3. Print clean ASCII table
+    print("\n--- Futures Hedging Execution Plan ---")
+    for sleeve in (summary.na_sleeve, summary.eu_sleeve):
+        print(f"[{sleeve.region_bloc} Sleeve]")
+        print(
+            f"  Capital: EUR {sleeve.sleeve_value_eur:,.2f} ({sleeve.sleeve_weight * 100:.1f}%) | "
+            f"Weighted Beta: {sleeve.sleeve_beta:.3f}"
+        )
+        print(
+            f"  Regime: State {sleeve.regime_state} ({sleeve.regime_name}) -> "
+            f"Hedge Ratio: {sleeve.hedge_ratio * 100:.1f}%"
+        )
+        print(f"  Hedged Notional: EUR {sleeve.hedged_notional_eur:,.2f}")
+        print(
+            f"  Contract: {sleeve.contract_symbol} @ {sleeve.contract_price:,.2f} "
+            f"({sleeve.contract_currency}) | Multiplier: {sleeve.contract_multiplier:.0f}"
+        )
+        print(
+            f"  ORDER RECOMMENDATION: SELL (SHORT) {sleeve.contracts_rounded} "
+            f"{sleeve.contract_symbol} contracts "
+            f"(exact: {sleeve.contracts_exact:.2f})"
+        )
+        print("")
+
+    eff_pct = summary.portfolio_effective_hedge_ratio * 100.0
+    print(
+        f"Consolidated Portfolio Hedged: EUR {summary.total_hedged_notional_eur:,.2f} "
+        f"({eff_pct:.2f}% effective hedge)"
+    )
+
+    if output_path:
+        out_p = Path(output_path)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        summary_df = summary.to_dataframe()
+        if out_p.suffix.lower() == ".parquet":
+            summary_df.to_parquet(out_p, index=False)
+        else:
+            summary_df.to_csv(out_p, index=False)
+        print(f"\n[Done] Saved hedging plan to: {out_p.resolve()}")
+
+
+def cmd_fetch_macro(start_date: str = "2010-01-01", end_date: str | None = None) -> None:
+    """Download macroeconomic series from FRED and persist into SQLite macro_series."""
+    cfg = PortfolioConfig()
+    paths = cfg.paths.resolve_paths()
+    store = SQLiteStore(paths.db_path)
+    downloader = FREDMacroDownloader(store=store, config=cfg)
+
+    print(f"Downloading macro series from FRED (start: {start_date})...")
+    count = downloader.download_and_sync_macro_series(start_date=start_date, end_date=end_date)
+    print(f"[Done] Successfully upserted {count} macro series records into SQLite.")
 
 
 def cmd_fetch_series(
@@ -602,6 +755,45 @@ def main() -> None:
     p_al.add_argument("--top-na", type=int, default=35, help="Top NA stocks (default: 35)")
     p_al.add_argument("--top-eu", type=int, default=25, help="Top EU stocks (default: 25)")
 
+    # regime
+    p_reg = subparsers.add_parser(
+        "regime", help="Inspect NA and EU HMM regime probabilities and 3d inertia state"
+    )
+    p_reg.add_argument("--date", required=True, help="As of date (YYYY-MM-DD)")
+
+    # hedge
+    p_hd = subparsers.add_parser(
+        "hedge", help="Calculate dual-sleeve beta-adjusted futures overlay and contract sizing"
+    )
+    p_hd.add_argument("--date", required=True, help="As of date (YYYY-MM-DD)")
+    p_hd.add_argument(
+        "--portfolio-value",
+        "-v",
+        type=float,
+        default=10_000_000.0,
+        help="Total portfolio capital in EUR (default: 10,000,000)",
+    )
+    p_hd.add_argument(
+        "--allocations",
+        "-a",
+        help="Optional path to allocations CSV/Parquet file from allocate command",
+    )
+    p_hd.add_argument("--output", "-o", help="Optional output path for hedging plan CSV/Parquet")
+    p_hd.add_argument("--na-future", choices=["ES", "MES"], help="NA future contract (default: ES)")
+    p_hd.add_argument(
+        "--eu-future", choices=["FXXP", "FESX"], help="EU future contract (default: FXXP)"
+    )
+    p_hd.add_argument(
+        "--eur-usd", type=float, default=1.08, help="EUR/USD exchange rate (default: 1.08)"
+    )
+
+    # fetch-macro
+    p_fm = subparsers.add_parser(
+        "fetch-macro", help="Download macroeconomic and credit spread series from FRED into SQLite"
+    )
+    p_fm.add_argument("--start", "-s", default="2010-01-01", help="Start date (YYYY-MM-DD)")
+    p_fm.add_argument("--end", "-e", default=None, help="End date (YYYY-MM-DD)")
+
     args = parser.parse_args()
     if args.command == "status":
         cmd_status()
@@ -667,6 +859,20 @@ def main() -> None:
             top_na=args.top_na,
             top_eu=args.top_eu,
         )
+    elif args.command == "regime":
+        cmd_regime(as_of_date=args.date)
+    elif args.command == "hedge":
+        cmd_hedge(
+            as_of_date=args.date,
+            portfolio_value=args.portfolio_value,
+            allocations_file=args.allocations,
+            output_path=args.output,
+            na_future=args.na_future,
+            eu_future=args.eu_future,
+            eur_usd_rate=args.eur_usd,
+        )
+    elif args.command == "fetch-macro":
+        cmd_fetch_macro(start_date=args.start, end_date=args.end)
     else:
         parser.print_help()
 
