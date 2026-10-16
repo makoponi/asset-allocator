@@ -4,7 +4,7 @@
 [![Package Manager](https://img.shields.io/badge/managed%20by-uv-purple.svg)](https://github.com/astral-sh/uv)
 [![Code Style](https://img.shields.io/badge/code%20style-ruff-black.svg)](https://github.com/astral-sh/ruff)
 [![Type Checking](https://img.shields.io/badge/type%20checking-mypy%20--strict-blue.svg)](https://mypy-lang.org/)
-[![Tests](https://img.shields.io/badge/tests-131%20passed%20(100%25)-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-132%20passed%20(100%25)-brightgreen.svg)](tests/)
 
 Sistema quantitativo end-to-end per la gestione e l'allocazione ottimale di un portafoglio azionario **Long-Only Transatlantico** (**USA + Canada + Europa**, *ex-Financials*), progettato per massimizzare il *Tail Risk Alpha* e mitigare i Drawdown severi tramite:
 
@@ -185,7 +185,7 @@ uv run ruff check --fix src tests && uv run ruff format src tests
 # Static type checking in modalità strict (nessun tipo implicito o Any non documentato)
 uv run mypy --strict src tests
 
-# Test suite completa (131 test deterministici, zero chiamate esterne di rete)
+# Test suite completa (132 test deterministici, zero chiamate esterne di rete)
 uv run pytest -v
 ```
 

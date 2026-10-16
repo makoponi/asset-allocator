@@ -226,4 +226,4 @@ quant-portfolio/
        * **Tab 4 - Walk-Forward Backtest:** esecuzione simulazione o visualizzazione risultati storici, curve NAV Hedged vs Unhedged, grafici di Drawdown e tabella di attribuzione dell'overlay future.
      * Comando CLI: `quant-portfolio dashboard [--host HOST] [--port PORT]`.
   3. **Test Suite Completa:**
-     * Suite espansa a **131 test unitari e di integrazione passati (100%)**, con `mypy --strict` e `ruff` al 100% conformi.
+     * Suite espansa a **132 test unitari e di integrazione passati (100%)**, con `mypy --strict` e `ruff` al 100% conformi.

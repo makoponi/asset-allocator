@@ -168,8 +168,77 @@ def render_tab_regime_shield(
     st.dataframe(summary_df, use_container_width=True)
 
 
+def load_candidates_for_date(
+    eval_date: str,
+    sqlite_store: SQLiteStore,
+    parquet_store: ParquetMarketStore,
+    top_na: int = 35,
+    top_eu: int = 25,
+) -> pd.DataFrame:
+    """Retrieve realistic candidate assets for allocation from database or datalake."""
+    # 1. Try universe_pit from SQLite
+    try:
+        univ = sqlite_store.get_universe_pit(exclude_financials=True)
+        if not univ.empty:
+            univ_date = univ[univ["as_of_date"] <= eval_date]
+            if univ_date.empty:
+                univ_date = univ
+            latest_date = str(univ_date["as_of_date"].max())
+            current_slice = univ_date[univ_date["as_of_date"] == latest_date]
+
+            na_s = current_slice[current_slice["region_bloc"] == "NA"]
+            eu_s = current_slice[current_slice["region_bloc"] == "EU"]
+            na_tickers = na_s["ticker"].drop_duplicates().tolist()[:top_na]
+            eu_tickers = eu_s["ticker"].drop_duplicates().tolist()[:top_eu]
+
+            if len(na_tickers) >= 10 and len(eu_tickers) >= 10:
+                tickers = na_tickers + eu_tickers
+                regions = ["NA"] * len(na_tickers) + ["EU"] * len(eu_tickers)
+                return pd.DataFrame(
+                    {
+                        "ticker": tickers,
+                        "region_bloc": regions,
+                        "score": [1.0] * len(tickers),
+                        "regional_rank": list(range(1, len(na_tickers) + 1))
+                        + list(range(1, len(eu_tickers) + 1)),
+                    }
+                )
+    except Exception:
+        pass
+
+    # 2. Try directly from Parquet datalake
+    try:
+        year = eval_date[:4]
+        pq_path = parquet_store.parquet_dir / f"daily_market_{year}.parquet"
+        if not pq_path.exists():
+            all_pqs = sorted(parquet_store.parquet_dir.glob("daily_market_*.parquet"))
+            if all_pqs:
+                pq_path = all_pqs[-1]
+        if pq_path.exists():
+            df_pq = pd.read_parquet(pq_path, columns=["ticker", "region_bloc"]).drop_duplicates()
+            na_t = df_pq[df_pq["region_bloc"] == "NA"]["ticker"].tolist()[:top_na]
+            eu_t = df_pq[df_pq["region_bloc"] == "EU"]["ticker"].tolist()[:top_eu]
+            if len(na_t) >= 10 and len(eu_t) >= 10:
+                tickers = na_t + eu_t
+                regions = ["NA"] * len(na_t) + ["EU"] * len(eu_t)
+                return pd.DataFrame(
+                    {
+                        "ticker": tickers,
+                        "region_bloc": regions,
+                        "score": [1.0] * len(tickers),
+                        "regional_rank": list(range(1, len(na_t) + 1))
+                        + list(range(1, len(eu_t) + 1)),
+                    }
+                )
+    except Exception:
+        pass
+
+    return pd.DataFrame(columns=["ticker", "region_bloc", "score", "regional_rank"])
+
+
 def render_tab_allocation_risk(
     config: PortfolioConfig,
+    sqlite_store: SQLiteStore,
     parquet_store: ParquetMarketStore,
 ) -> None:
     """Tab 2: Optimal portfolio allocation and MCTR risk decomposition."""
@@ -188,21 +257,40 @@ def render_tab_allocation_risk(
         st.write("Sleeve Constraints:")
         st.caption("NA: 50%-65% (35 stocks) | EU: 35%-50% (25 stocks) | Assets: 0.5%-3.5%")
 
-    # Synthetic or loaded candidates
-    np.random.seed(42)
-    na_tickers = [f"NA_STK_{i:02d}" for i in range(1, 36)]
-    eu_tickers = [f"EU_STK_{i:02d}" for i in range(1, 26)]
-    all_tickers = na_tickers + eu_tickers
-    regions = ["NA"] * 35 + ["EU"] * 25
-
-    candidates_df = pd.DataFrame(
-        {
-            "ticker": all_tickers,
-            "region_bloc": regions,
-            "score": np.random.uniform(0.5, 2.0, size=60),
-            "regional_rank": list(range(1, 36)) + list(range(1, 26)),
-        }
+    uploaded_candidates = st.file_uploader(
+        "Upload Custom Candidates File (Optional, CSV or Parquet)",
+        type=["csv", "parquet"],
+        key="custom_cands_file",
     )
+
+    if uploaded_candidates is not None:
+        try:
+            if uploaded_candidates.name.endswith(".parquet"):
+                candidates_df = pd.read_parquet(uploaded_candidates)
+            else:
+                candidates_df = pd.read_csv(uploaded_candidates, keep_default_na=False)
+                if "region_bloc" in candidates_df.columns:
+                    candidates_df["region_bloc"] = (
+                        candidates_df["region_bloc"].replace("", "NA").fillna("NA")
+                    )
+            st.success(f"Loaded {len(candidates_df)} candidates from uploaded file.")
+        except Exception as e:
+            st.error(f"Error parsing candidates file: {e}")
+            candidates_df = load_candidates_for_date(
+                eval_date=eval_date,
+                sqlite_store=sqlite_store,
+                parquet_store=parquet_store,
+            )
+    else:
+        candidates_df = load_candidates_for_date(
+            eval_date=eval_date,
+            sqlite_store=sqlite_store,
+            parquet_store=parquet_store,
+        )
+
+    if candidates_df.empty:
+        st.warning("No candidates found in database or uploaded file for this date.")
+        return
 
     alloc_pipe = PortfolioAllocationPipeline(parquet_store=parquet_store, config=config)
     alloc_df, risk_summary = alloc_pipe.allocate_candidates(
@@ -262,14 +350,18 @@ def render_tab_allocation_risk(
         fig_bar.update_layout(xaxis_tickangle=-45)
         st.plotly_chart(fig_bar, use_container_width=True)
 
-    st.subheader("Allocated Constituents & Marginal Risk (Top 60)")
+    st.subheader(f"Allocated Constituents & Marginal Risk (Total: {len(alloc_df)} Assets)")
     st.dataframe(
         alloc_df.style.format({"weight": "{:.4%}", "mctr": "{:.6f}"}),
         use_container_width=True,
     )
 
 
-def render_tab_rebalance_orders(config: PortfolioConfig) -> None:
+def render_tab_rebalance_orders(
+    config: PortfolioConfig,
+    sqlite_store: SQLiteStore,
+    parquet_store: ParquetMarketStore,
+) -> None:
     """Tab 3: Turnover buffer filtering, delta orders, and execution cost estimation."""
     st.header("Tab 3 — Monthly Rebalancing & Delta Orders Generation")
 
@@ -303,16 +395,36 @@ def render_tab_rebalance_orders(config: PortfolioConfig) -> None:
 
     # Target weights simulation
     np.random.seed(101)
-    tickers = [f"NA_STK_{i:02d}" for i in range(1, 36)] + [f"EU_STK_{i:02d}" for i in range(1, 26)]
-    weights = np.random.uniform(0.005, 0.035, size=60)
-    weights /= weights.sum()
-    target_weights_df = pd.DataFrame(
-        {
-            "ticker": tickers,
-            "region_bloc": ["NA"] * 35 + ["EU"] * 25,
-            "weight": weights,
-        }
+    cands_for_target = load_candidates_for_date(
+        eval_date="2024-06-28",
+        sqlite_store=sqlite_store,
+        parquet_store=parquet_store,
     )
+    if not cands_for_target.empty:
+        tickers = cands_for_target["ticker"].tolist()
+        regions = cands_for_target["region_bloc"].tolist()
+        weights = np.random.uniform(0.005, 0.035, size=len(tickers))
+        weights /= weights.sum()
+        target_weights_df = pd.DataFrame(
+            {
+                "ticker": tickers,
+                "region_bloc": regions,
+                "weight": weights,
+            }
+        )
+    else:
+        tickers = [f"NA_STK_{i:02d}" for i in range(1, 36)] + [
+            f"EU_STK_{i:02d}" for i in range(1, 26)
+        ]
+        weights = np.random.uniform(0.005, 0.035, size=60)
+        weights /= weights.sum()
+        target_weights_df = pd.DataFrame(
+            {
+                "ticker": tickers,
+                "region_bloc": ["NA"] * 35 + ["EU"] * 25,
+                "weight": weights,
+            }
+        )
 
     tb_filter = TurnoverBufferFilter(config=config)
     delta_orders_df = tb_filter.generate_delta_orders(
@@ -522,9 +634,9 @@ def main() -> None:
     with tab1:
         render_tab_regime_shield(config, sqlite_store, parquet_store)
     with tab2:
-        render_tab_allocation_risk(config, parquet_store)
+        render_tab_allocation_risk(config, sqlite_store, parquet_store)
     with tab3:
-        render_tab_rebalance_orders(config)
+        render_tab_rebalance_orders(config, sqlite_store, parquet_store)
     with tab4:
         render_tab_walk_forward_backtest(config, sqlite_store, parquet_store)
 

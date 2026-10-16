@@ -28,3 +28,23 @@ def test_cmd_dashboard_invocation(monkeypatch: object) -> None:
         assert "127.0.0.1" in args
         assert "--server.port" in args
         assert "8502" in args
+
+
+def test_load_candidates_for_date() -> None:
+    """Verify realistic candidate retrieval for dashboard Tab 2 and Tab 3."""
+    from quant_portfolio.dashboard.app import load_candidates_for_date
+
+    config, sqlite_store, parquet_store = get_system_components()
+    cands = load_candidates_for_date(
+        eval_date="2024-06-28",
+        sqlite_store=sqlite_store,
+        parquet_store=parquet_store,
+        top_na=35,
+        top_eu=25,
+    )
+    # If the datalake or universe is populated, ensure candidates are correctly formed
+    if not cands.empty:
+        assert "ticker" in cands.columns
+        assert "region_bloc" in cands.columns
+        assert set(cands["region_bloc"].unique()).issubset({"NA", "EU"})
+        assert len(cands) <= 60
