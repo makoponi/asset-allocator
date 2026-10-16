@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     from quant_portfolio.alpha.pipeline import AlphaPipeline
+    from quant_portfolio.hedging.engine import DualSleeveHedgeSummary
     from quant_portfolio.storage.schema import ParquetMarketStore, SQLiteStore
 
 
@@ -287,6 +288,7 @@ class WalkForwardBacktestEngine:
                     sym_pnl = -float(qty) * (p_now - p_prev) * mult / fx
                     fut_pnl_eur += sym_pnl
 
+            hedge_summary: DualSleeveHedgeSummary | None = None
             if enable_hedging and not current_weights_df.empty:
                 # Run regime sensor and hedge sizing
                 hedge_summary = self.regime_pipeline.execute_hedging_pipeline(
@@ -315,9 +317,9 @@ class WalkForwardBacktestEngine:
                     if d != 0:
                         contract_deltas[sym] = d
                         p = cur_fut_quotes.get(sym, 5000.0)
-                        m = FUTURE_MULTIPLIERS.get(sym, 50.0)
+                        mult = FUTURE_MULTIPLIERS.get(sym, 50.0)
                         fx = daily_fx if FUTURE_CURRENCIES.get(sym, "EUR") == "USD" else 1.0
-                        contract_notionals[sym] = p * m / fx
+                        contract_notionals[sym] = p * mult / fx
 
                 if contract_deltas:
                     daily_fut_cost, _ = self.cost_model.calculate_futures_costs(
@@ -357,6 +359,11 @@ class WalkForwardBacktestEngine:
                     "eu_weight": eu_weight_sum,
                     "es_contracts": current_contracts.get("ES", 0),
                     "fxxp_contracts": current_contracts.get("FXXP", 0),
+                    "na_regime": hedge_summary.na_sleeve.regime_state if hedge_summary else 0,
+                    "eu_regime": hedge_summary.eu_sleeve.regime_state if hedge_summary else 0,
+                    "effective_hedge_ratio": (
+                        hedge_summary.portfolio_effective_hedge_ratio if hedge_summary else 0.0
+                    ),
                 }
             )
 

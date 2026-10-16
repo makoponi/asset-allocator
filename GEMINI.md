@@ -63,6 +63,9 @@ Gli agenti devono implementare controlli assertivi (`assert` o eccezioni custom)
    * Nelle interrogazioni storiche `bdh`, assicurare sempre l'append del suffisso `Equity` (es. `f"{t} Equity"`) in input e il recupero pulito in output per prevenire errori `BAD_SEC` del DAPI.
    * Tutti i download massivi di serie giornaliere devono eseguire il checkpointing immediato batch-by-batch su Parquet con supporto a `--skip-existing`.
    * *Protezione Quote DAPI & Macro Series via FRED:* Per prevenire blocchi di quota (`LIMIT - WORKFLOW_REVIEW_NEEDED`) sul terminale, le serie macro storiche (`VIX`, US HY OAS `BAMLH0A0HYM2`, Curva Treasury `T10Y2Y`, Euro HY OAS `BAMLHE00EHYIOAS`, Curva Bund) devono essere alimentate tramite il downloader FRED (`fetch-macro`) via `pd.read_csv(url)` a consumo zero di securities count Bloomberg.
+7. **Allineamento Multi-Feature nei Modelli di Regime (Anti-Truncation Rule):**
+   * Nei modelli di classificazione di regime (HMM, Turbolenza), non applicare mai un `.dropna()` congiunto cieco su insiemi di serie macro aventi date di decorrenza eterogenee.
+   * Se serie secondarie o di recente introduzione (es. credit spread HY censiti dal 2023) hanno disponibilità parziale, isolare le serie core storiche (VIX/V2TX, curve governative, turbolenza) in modo che l'algoritmo possa operare sull'intero orizzonte storico decennale senza cadere in stati di fallback per mancanza di dati.
 
 ---
 
@@ -227,3 +230,18 @@ quant-portfolio/
      * Comando CLI: `quant-portfolio dashboard [--host HOST] [--port PORT]`.
   3. **Test Suite Completa:**
      * Suite espansa a **132 test unitari e di integrazione passati (100%)**, con `mypy --strict` e `ruff` al 100% conformi.
+
+---
+
+## 6. Roadmap Successiva & TODO Evolutivi
+
+* **TODO 1: Gestione Adattiva Feature Macro HMM & Estensione Storica 2010-2023**
+  * *Contesto:* Nel database quant_store.db, le serie macro core (VIX, V2TX, T10Y2Y, BUND10Y2Y) coprono dal 2010 a oggi (>4.200 date), mentre gli spread High Yield OAS partono da fine 2023.
+  * *Implementazione:* Aggiornare RegimeFeatureBuilder.build_regime_features() per selezionare dinamicamente le feature disponibili alla data t. Quando le serie HY non sono presenti, alimentare l'HMM con la terna consolidata (Volatilità implicita, Pendenza governativa, Turbolenza di Mahalanobis).
+  * *Obiettivo:* Consentire all'HMM di attivare i regimi *Alert* e *Severe Stress* anche durante i drawdown storici precedenti al 2024 (Sell-off 2015-2016, shock Q4 2018, crollo COVID marzo 2020, bear market tassi 2022).
+
+* **TODO 2: Proxy Dinamico Quotazioni Future & Mark-to-Market Overlay nel Simulatore**
+  * *Contesto:* WalkForwardBacktestEngine modella correttamente il numero di contratti short (ES/MES, FXXP/FESX) e i costi di turnover/roll (1.5 bps), ma necessita di variazioni di prezzo per il mark-to-market.
+  * *Implementazione:* Integrare un utures_prices_loader predefinito in 
+un_backtest() che colleghi l'evoluzione giornaliera dei future ai rendimenti effettivi dei benchmark di mercato (proxy S&P 500 e STOXX 600) o agli sleeve azionari regionali in EUR.
+  * *Obiettivo:* Calcolare la variation margin esatta, quantificare l'Alpha di copertura e dimostrare l'effettiva mitigazione del Maximum Drawdown dal -36,55% verso l'obiettivo target di portafoglio protetto.

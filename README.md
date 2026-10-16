@@ -191,5 +191,12 @@ uv run pytest -v
 
 ---
 
+## Roadmap & Sviluppi Futuri
+
+1. **Estensione Storica HMM Decennale (2010–2023):** selezione adattiva delle feature macro nel RegimeFeatureBuilder per abilitare i sensori di stress anche in assenza di serie creditizie ad avvio recente, coprendo storicamente shock sistemici come COVID 2020 e inflazione 2022.
+2. **Mark-to-Market Dinamico Contratti Future:** integrazione del proxy quotazioni future per la determinazione puntuale della variation margin giornaliera e quantificazione dell'abbattimento effettivo del Maximum Drawdown.
+
+---
+
 ## Licenza e Proprietà
 Progetto sviluppato per il team di Risk Management & Finanza Quantitativa di **Consultinvest** (CONSULT PARTECIPAZIONI SPA). Tutti i diritti riservati.
