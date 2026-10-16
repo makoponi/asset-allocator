@@ -669,10 +669,17 @@ def cmd_backtest(
     print(f"Rebalance Frequency:     Every {rebalance_freq} business days (Monthly)")
     print(f"Dynamic Futures Hedging: {'ENABLED' if enable_hedging else 'DISABLED'}")
 
+    alpha_pipe = AlphaPipeline(
+        config=cfg,
+        sqlite_store=sqlite_store,
+        parquet_store=parquet_store,
+    )
+
     engine = WalkForwardBacktestEngine(
         sqlite_store=sqlite_store,
         parquet_store=parquet_store,
         config=cfg,
+        alpha_pipeline=alpha_pipe,
     )
 
     daily_df, report, rebal_df = engine.run_backtest(
@@ -740,7 +747,7 @@ def cmd_rebalance(
         sqlite_store=sqlite_store,
         parquet_store=parquet_store,
     )
-    ranked_univ = alpha_pipe.rank_and_select_at_date(as_of_date=as_of_date)
+    ranked_univ = alpha_pipe.score_and_rank_universe(as_of_date=as_of_date)
 
     # 3. Apply Turnover Buffer (Hold decile <= 3)
     tb_filter = TurnoverBufferFilter(config=cfg)

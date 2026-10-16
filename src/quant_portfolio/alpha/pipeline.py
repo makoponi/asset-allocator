@@ -158,23 +158,44 @@ class AlphaPipeline:
             "fold_metrics": fold_metrics,
         }
 
-    def rank_and_select_at_date(
+    def _resolve_historical_training_dates(self, as_of_date: str) -> list[str]:
+        """Fetch historical training dates prior to as_of_date minus purge window."""
+        purge_days = self.alpha_config.purge_days
+        cutoff_dt = pd.Timestamp(as_of_date) - pd.tseries.offsets.BDay(purge_days)
+        cutoff_str = cutoff_dt.strftime("%Y-%m-%d")
+
+        query = (
+            "SELECT DISTINCT as_of_date FROM universe_pit "
+            "WHERE as_of_date <= ? ORDER BY as_of_date ASC"
+        )
+        with self.sqlite_store.get_connection() as conn:
+            dates_df = pd.read_sql_query(query, conn, params=[cutoff_str])
+        return [str(d) for d in dates_df["as_of_date"].tolist()]
+
+    def score_and_rank_universe(
         self,
         as_of_date: str,
         training_dates: Sequence[str] | None = None,
         top_na: int | None = None,
         top_eu: int | None = None,
     ) -> pd.DataFrame:
-        """Compute features, score universe, and select candidates for as_of_date."""
-        # 1. Train model if not already fitted
-        if not self.model.is_fitted:
-            if not training_dates:
-                raise ValueError("Model is not fitted. Must provide training_dates to fit.")
-            logger.info("Training ensemble model on %d historical dates...", len(training_dates))
-            train_df = self.build_labeled_dataset(training_dates)
-            train_clean = train_df.dropna(subset=["target"]).reset_index(drop=True)
-            feature_cols = list(ALL_CORE_FEATURES)
-            self.model.fit(train_clean[feature_cols], train_clean["target"])
+        """Compute features, train model if needed, score, and return full ranked universe."""
+        # 1. Train model if training_dates provided or not fitted
+        if training_dates is not None or not self.model.is_fitted:
+            dates_to_train = (
+                list(training_dates)
+                if training_dates is not None
+                else self._resolve_historical_training_dates(as_of_date)
+            )
+            if dates_to_train:
+                logger.info(
+                    "Training ensemble model on %d historical dates...", len(dates_to_train)
+                )
+                train_df = self.build_labeled_dataset(dates_to_train)
+                train_clean = train_df.dropna(subset=["target"]).reset_index(drop=True)
+                if not train_clean.empty:
+                    feature_cols = list(ALL_CORE_FEATURES)
+                    self.model.fit(train_clean[feature_cols], train_clean["target"])
 
         # 2. Extract features at as_of_date
         features_t = self.feature_pipeline.build_features_at_date(as_of_date, normalize=True)
@@ -183,14 +204,38 @@ class AlphaPipeline:
             return pd.DataFrame()
 
         # 3. Predict expected excess return score
-        scores = self.model.predict(features_t)
+        if self.model.is_fitted:
+            scores = self.model.predict(features_t)
+        else:
+            # Fallback uniform deterministic scores if no training data was available
+            scores = np.linspace(1.0, 0.0, len(features_t))
+
         scored_universe = features_t.copy()
         scored_universe["score"] = scores
 
-        # 4. Stratified selection
-        selected = self.selector.select_candidates(
+        # 4. Return full ranked universe with regional ranks and deciles
+        return self.selector.rank_full_universe(
             scored_universe=scored_universe,
             top_na=top_na,
             top_eu=top_eu,
         )
+
+    def rank_and_select_at_date(
+        self,
+        as_of_date: str,
+        training_dates: Sequence[str] | None = None,
+        top_na: int | None = None,
+        top_eu: int | None = None,
+    ) -> pd.DataFrame:
+        """Compute features, score universe, and select candidates for as_of_date."""
+        ranked = self.score_and_rank_universe(
+            as_of_date=as_of_date,
+            training_dates=training_dates,
+            top_na=top_na,
+            top_eu=top_eu,
+        )
+        if ranked.empty:
+            return pd.DataFrame()
+
+        selected = ranked[ranked["is_selected"]].reset_index(drop=True)
         return selected

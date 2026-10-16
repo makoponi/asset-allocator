@@ -31,6 +31,13 @@ logger = logging.getLogger(__name__)
 BATCH_SIZE: Final[int] = 50
 THROTTLE_SECONDS: Final[float] = 0.35
 
+PRICE_BASED_METRICS: Final[set[str]] = {
+    "PE_RATIO",
+    "PX_TO_BOOK_RATIO",
+    "EV_TO_T12M_EBITDA",
+    "FREE_CASH_FLOW_YIELD",
+}
+
 BDPCallable = Callable[..., Any]
 BDHCallable = Callable[..., Any]
 
@@ -199,6 +206,7 @@ class BloombergFundamentalsDownloader:
         periodicity: str = "M",
         skip_existing: bool = True,
         limit_tickers: int | None = None,
+        apply_reporting_lag_days: int = 60,
     ) -> int:
         """Fetch historical monthly fundamentals via xbbg BDH without affecting securities count."""
         if not tickers:
@@ -246,6 +254,7 @@ class BloombergFundamentalsDownloader:
                     records = self._format_bdh_fundamentals(
                         df=df,
                         clean_to_raw=clean_to_raw,
+                        apply_reporting_lag_days=apply_reporting_lag_days,
                     )
                     if not records.empty:
                         count = self.store.upsert_fundamentals_pit(records)
@@ -267,6 +276,7 @@ class BloombergFundamentalsDownloader:
         self,
         df: pd.DataFrame,
         clean_to_raw: dict[str, str],
+        apply_reporting_lag_days: int = 60,
     ) -> pd.DataFrame:
         """Convert BDH output (tidy long or MultiIndex) into fundamentals_pit schema."""
         if df.empty:
@@ -287,10 +297,17 @@ class BloombergFundamentalsDownloader:
                     clean_t = clean_t[:-7].strip()
                 field_str = str(row["field"]).upper().strip()
                 if field_str in CORE_FUNDAMENTAL_METRICS:
+                    if field_str in PRICE_BASED_METRICS or apply_reporting_lag_days <= 0:
+                        eff_date = d_str
+                    else:
+                        eff_date = (
+                            pd.Timestamp(d_str) + pd.Timedelta(days=apply_reporting_lag_days)
+                        ).strftime("%Y-%m-%d")
+
                     records.append(
                         {
-                            "as_of_date": d_str,
-                            "filing_date": d_str,
+                            "as_of_date": eff_date,
+                            "filing_date": eff_date,
                             "ticker": clean_t,
                             "metric": field_str,
                             "value": float(v),
@@ -310,10 +327,18 @@ class BloombergFundamentalsDownloader:
                     clean_t = clean_to_raw.get(str(raw_sec), str(raw_sec))
                     if clean_t.upper().endswith(" EQUITY"):
                         clean_t = clean_t[:-7].strip()
+
+                    if field_str in PRICE_BASED_METRICS or apply_reporting_lag_days <= 0:
+                        eff_date = d_str
+                    else:
+                        eff_date = (
+                            pd.Timestamp(d_str) + pd.Timedelta(days=apply_reporting_lag_days)
+                        ).strftime("%Y-%m-%d")
+
                     records.append(
                         {
-                            "as_of_date": d_str,
-                            "filing_date": d_str,
+                            "as_of_date": eff_date,
+                            "filing_date": eff_date,
                             "ticker": clean_t,
                             "metric": field_str,
                             "value": float(v),

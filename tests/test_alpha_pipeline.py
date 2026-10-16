@@ -144,3 +144,32 @@ def test_alpha_pipeline_end_to_end(
     assert "score" in candidates.columns
     assert "regional_rank" in candidates.columns
     assert "is_selected" in candidates.columns
+
+
+def test_alpha_pipeline_score_and_rank_universe(
+    synthetic_alpha_env: tuple[PortfolioConfig, SQLiteStore, ParquetMarketStore],
+) -> None:
+    """Verify score_and_rank_universe produces full ranking and auto-resolves historical dates."""
+    cfg, store, p_store = synthetic_alpha_env
+
+    pipeline = AlphaPipeline(
+        config=cfg,
+        sqlite_store=store,
+        parquet_store=p_store,
+    )
+
+    dates = pd.bdate_range("2024-01-01", periods=80).strftime("%Y-%m-%d").tolist()
+    target_date = dates[::20][-1]
+
+    # Model is not fitted yet, calling score_and_rank_universe with training_dates=None
+    ranked = pipeline.score_and_rank_universe(as_of_date=target_date)
+    assert not ranked.empty
+    assert len(ranked) == 20  # All 20 stocks in active universe
+    assert "regional_decile" in ranked.columns
+    assert "regional_rank" in ranked.columns
+    assert "score" in ranked.columns
+    assert "is_selected" in ranked.columns
+
+    # Verify rank_and_select_at_date also works seamlessly with training_dates=None
+    selected = pipeline.rank_and_select_at_date(as_of_date=target_date, top_na=3, top_eu=3)
+    assert len(selected) == 6

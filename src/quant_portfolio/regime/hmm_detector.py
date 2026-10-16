@@ -80,12 +80,13 @@ class ExpandingGaussianHMM:
         # Primary criterion: mean of the first feature (volatility/stress).
         # Secondary criterion: trace of covariance matrix.
         stress_metric = np.zeros(self.n_states, dtype=np.float64)
+        raw_covars: np.ndarray = model._covars_
         for s in range(self.n_states):
             first_feat_mean = float(model.means_[s, 0])
             if self.covariance_type == "diag":
-                cov_var = float(np.sum(model.covars_[s, :]))
+                cov_var = float(np.sum(raw_covars[s]))
             else:
-                cov_var = float(np.trace(model.covars_[s]))
+                cov_var = float(np.trace(raw_covars[s]))
             stress_metric[s] = first_feat_mean + 0.01 * np.sqrt(cov_var)
 
         perm = np.argsort(stress_metric)
@@ -94,11 +95,7 @@ class ExpandingGaussianHMM:
         model.startprob_ = model.startprob_[perm]
         model.transmat_ = model.transmat_[perm, :][:, perm]
         model.means_ = model.means_[perm, :]
-        if self.covariance_type == "diag":
-            diag_covars = np.diagonal(model.covars_, axis1=1, axis2=2)
-            model.covars_ = diag_covars[perm]
-        else:
-            model.covars_ = model.covars_[perm, :, :][:, perm, :]
+        model._covars_ = raw_covars[perm]
 
         self.model = model
         self._fitted = True
@@ -182,7 +179,7 @@ class DualExpandingRegimeDetector:
             panel = self.feature_builder.build_regime_features(
                 region_bloc=region_bloc,
                 as_of_date=as_of_date,
-                history_days=self.config.regime.min_history_days * 2,
+                history_days=2520,
             )
 
             if len(panel) < self.config.regime.min_history_days:

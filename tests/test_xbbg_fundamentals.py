@@ -112,6 +112,13 @@ def test_bloomberg_fundamentals_downloader_historical_bdh(sqlite_store: SQLiteSt
     assert len(calls) == 2  # 3 tickers in batches of 2
     assert count == 6  # 3 tickers * 2 fields
 
-    stored = sqlite_store.get_fundamentals_pit(as_of_date="2023-12-31")
-    assert len(stored) == 6
-    assert set(stored["ticker"].unique()) == {"SAP GY", "ASML NA", "MC FP"}
+    # PE_RATIO is available immediately on 2023-12-31 (price-based)
+    stored_immediate = sqlite_store.get_fundamentals_pit(as_of_date="2023-12-31")
+    assert len(stored_immediate) == 3
+    assert set(stored_immediate["metric"].unique()) == {"PE_RATIO"}
+
+    # RETURN_COM_EQY is available after the 60-day reporting lag (2024-02-29 in leap year 2024)
+    stored_lagged = sqlite_store.get_fundamentals_pit(as_of_date="2024-02-29")
+    assert len(stored_lagged) == 3
+    assert set(stored_lagged["metric"].unique()) == {"RETURN_COM_EQY"}
+    assert set(stored_lagged["ticker"].unique()) == {"SAP GY", "ASML NA", "MC FP"}

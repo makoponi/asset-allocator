@@ -99,6 +99,33 @@ def test_walk_forward_engine_simulation_run(tmp_path: object) -> None:
         regime_pipeline=mock_regime_pipeline,
     )
 
+    # Inject synthetic market prices with positive trend for AAPL US and ASML NA
+    dates_bt = pd.bdate_range("2023-12-15", "2024-01-20").strftime("%Y-%m-%d").tolist()
+    m_rows = []
+    for i, d in enumerate(dates_bt):
+        factor = 1.0 + 0.005 * i  # +0.5% return per day
+        m_rows.append(
+            {
+                "date": d,
+                "ticker": "AAPL US",
+                "region_bloc": "NA",
+                "px_last_eur": 150.0 * factor,
+                "tot_return_idx_eur": 100.0 * factor,
+                "volume_eur": 1_000_000.0,
+            }
+        )
+        m_rows.append(
+            {
+                "date": d,
+                "ticker": "ASML NA",
+                "region_bloc": "EU",
+                "px_last_eur": 650.0 * factor,
+                "tot_return_idx_eur": 100.0 * factor,
+                "volume_eur": 1_000_000.0,
+            }
+        )
+    mock_parquet.read_daily_market.return_value = pd.DataFrame(m_rows)
+
     # Custom candidate ranked universe loader
     def mock_universe_loader(as_of_date: str) -> pd.DataFrame:
         return pd.DataFrame(
@@ -143,8 +170,10 @@ def test_walk_forward_engine_simulation_run(tmp_path: object) -> None:
     # Verify NAV preservation and accounting continuity
     from typing import cast
 
-    assert cast("float", daily_df.loc[0, "nav_unhedged"]) > 0
-    assert cast("float", daily_df.loc[0, "nav_hedged"]) > 0
+    final_unhedged = cast("float", daily_df.iloc[-1]["nav_unhedged"])
+    assert final_unhedged != 1_000_000.0
+    assert final_unhedged > 1_000_000.0
+    assert daily_df["unhedged_return"].sum() > 0.0
 
     # Verify report components
     assert report.total_rebalances == 2
@@ -152,3 +181,62 @@ def test_walk_forward_engine_simulation_run(tmp_path: object) -> None:
     assert report.overlay_attribution is not None
     assert report.sleeve_na.region_bloc == "NA"
     assert report.sleeve_eu.region_bloc == "EU"
+
+
+def test_walk_forward_engine_with_alpha_pipeline() -> None:
+    """Verify that WalkForwardBacktestEngine integrates AlphaPipeline for candidate ranking."""
+    mock_sqlite = MagicMock()
+    mock_parquet = MagicMock()
+    mock_alpha = MagicMock()
+
+    cfg = PortfolioConfig()
+    engine = WalkForwardBacktestEngine(
+        sqlite_store=mock_sqlite,
+        parquet_store=mock_parquet,
+        config=cfg,
+        alpha_pipeline=mock_alpha,
+    )
+    engine._last_alpha_train_date = "2024-01-02"
+
+    # Set up mock AlphaPipeline behavior
+    mock_alpha.model.is_fitted = True
+    features_mock = pd.DataFrame(
+        [
+            {"ticker": "NVDA US", "region_bloc": "NA", "gics_sector": 45},
+            {"ticker": "MC FP", "region_bloc": "EU", "gics_sector": 25},
+        ]
+    )
+    mock_alpha.feature_pipeline.build_features_at_date.return_value = features_mock
+    mock_alpha.model.predict.return_value = [0.08, 0.05]
+
+    expected_ranked = pd.DataFrame(
+        [
+            {
+                "ticker": "NVDA US",
+                "region_bloc": "NA",
+                "score": 0.08,
+                "regional_decile": 1,
+                "regional_rank": 1,
+                "is_selected": True,
+            },
+            {
+                "ticker": "MC FP",
+                "region_bloc": "EU",
+                "score": 0.05,
+                "regional_decile": 1,
+                "regional_rank": 1,
+                "is_selected": True,
+            },
+        ]
+    )
+    mock_alpha.selector.rank_full_universe.return_value = expected_ranked
+
+    ranked_df = engine._load_default_ranked_universe("2024-01-02")
+    assert not ranked_df.empty
+    assert len(ranked_df) == 2
+    assert "regional_decile" in ranked_df.columns
+    mock_alpha.feature_pipeline.build_features_at_date.assert_called_once_with(
+        "2024-01-02", normalize=True
+    )
+    mock_alpha.model.predict.assert_called_once()
+    mock_alpha.selector.rank_full_universe.assert_called_once()

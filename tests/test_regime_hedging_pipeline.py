@@ -123,6 +123,11 @@ def test_regime_hedging_pipeline_integration(
     assert summary_stress.na_sleeve.contracts_rounded >= 0
     assert summary_stress.eu_sleeve.contracts_rounded >= 0
 
+    # Verify monthly/expanding HMM model caching
+    assert "NA" in pipeline._cached_hmm and "EU" in pipeline._cached_hmm
+    assert pipeline._days_since_fit["NA"] >= 0
+    assert pipeline._days_since_fit["EU"] >= 0
+
 
 def test_cli_regime_and_hedge_commands(
     integrated_env: tuple[SQLiteStore, ParquetMarketStore, pd.DataFrame],

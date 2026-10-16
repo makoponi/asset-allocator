@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 import pandas as pd
 
+from quant_portfolio.alpha.selector import StratifiedSleeveSelector
 from quant_portfolio.backtest.costs import TransactionCostModel
 from quant_portfolio.backtest.metrics import FullPerformanceReport, build_full_performance_report
 from quant_portfolio.backtest.turnover import TurnoverBufferFilter
@@ -21,8 +22,9 @@ from quant_portfolio.hedging.pipeline import DEFAULT_FUTURES_QUOTES, RegimeHedgi
 from quant_portfolio.risk.pipeline import AllocationMethod, PortfolioAllocationPipeline
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
+    from quant_portfolio.alpha.pipeline import AlphaPipeline
     from quant_portfolio.storage.schema import ParquetMarketStore, SQLiteStore
 
 
@@ -37,6 +39,7 @@ class WalkForwardBacktestEngine:
         sqlite_store: SQLiteStore,
         parquet_store: ParquetMarketStore,
         config: PortfolioConfig | None = None,
+        alpha_pipeline: AlphaPipeline | None = None,
         allocation_pipeline: PortfolioAllocationPipeline | None = None,
         regime_pipeline: RegimeHedgingPipeline | None = None,
         turnover_filter: TurnoverBufferFilter | None = None,
@@ -46,6 +49,9 @@ class WalkForwardBacktestEngine:
         self.bt_config: BacktestConfig = self.config.backtest or BacktestConfig()
         self.store = sqlite_store
         self.parquet_store = parquet_store
+        self.alpha_pipeline = alpha_pipeline
+        self._returns_matrix: pd.DataFrame | None = None
+        self._last_alpha_train_date: str | None = None
 
         self.allocation_pipeline = allocation_pipeline or PortfolioAllocationPipeline(
             parquet_store=self.parquet_store,
@@ -58,6 +64,7 @@ class WalkForwardBacktestEngine:
         )
         self.turnover_filter = turnover_filter or TurnoverBufferFilter(config=self.config)
         self.cost_model = cost_model or TransactionCostModel(config=self.config)
+        self.sleeve_selector = StratifiedSleeveSelector(config=self.config)
 
     def _get_business_calendar(self, start_date: str, end_date: str) -> list[str]:
         """Fetch available business dates within the simulation range."""
@@ -72,6 +79,8 @@ class WalkForwardBacktestEngine:
         initial_capital_eur: float | None = None,
         enable_hedging: bool = True,
         rebalance_freq_days: int | None = None,
+        eur_usd_rate: float = 1.08,
+        fx_rate_loader: Callable[[str], float] | None = None,
         ranked_universe_loader: object | None = None,
         futures_prices_loader: object | None = None,
     ) -> tuple[pd.DataFrame, FullPerformanceReport, pd.DataFrame]:
@@ -91,6 +100,10 @@ class WalkForwardBacktestEngine:
             Whether to activate dynamic futures overlay.
         rebalance_freq_days : int | None
             Number of business days between equity rebalancings (default from config: 21).
+        eur_usd_rate : float
+            Base EUR/USD exchange rate for USD-denominated futures (default: 1.08).
+        fx_rate_loader : callable | None
+            Optional callable `(current_date: str) -> float` for dynamic historical FX rates.
         ranked_universe_loader : callable | None
             Optional callable `(as_of_date: str) -> pd.DataFrame` for custom candidate ranking.
         futures_prices_loader : callable | None
@@ -107,6 +120,22 @@ class WalkForwardBacktestEngine:
         calendar = self._get_business_calendar(start_date, end_date)
         if not calendar:
             raise ValueError(f"No business days found between {start_date} and {end_date}.")
+
+        # Pre-load daily returns matrix from ParquetMarketStore for [start_date - 15 days, end_date]
+        pre_start = (pd.Timestamp(start_date) - pd.Timedelta(days=15)).strftime("%Y-%m-%d")
+        try:
+            m_df = self.parquet_store.read_daily_market(
+                start_date=pre_start,
+                end_date=end_date,
+            )
+            if not m_df.empty and "tot_return_idx_eur" in m_df.columns:
+                p_df = m_df.pivot(index="date", columns="ticker", values="tot_return_idx_eur")
+                self._returns_matrix = p_df.pct_change(fill_method=None)
+            else:
+                self._returns_matrix = None
+        except Exception as exc:
+            logger.debug("Could not pre-load returns matrix: %s", exc)
+            self._returns_matrix = None
 
         logger.info(
             f"Starting Walk-Forward backtest ({calendar[0]} to {calendar[-1]}, "
@@ -225,6 +254,12 @@ class WalkForwardBacktestEngine:
             fut_pnl_eur = 0.0
             target_contracts = dict(current_contracts)
 
+            daily_fx = (
+                float(fx_rate_loader(current_date))
+                if fx_rate_loader and callable(fx_rate_loader)
+                else eur_usd_rate
+            )
+
             # Get futures prices
             if futures_prices_loader and callable(futures_prices_loader):
                 cur_fut_quotes = futures_prices_loader(current_date)
@@ -238,7 +273,7 @@ class WalkForwardBacktestEngine:
                     p_now = cur_fut_quotes.get(sym, p_prev)
                     mult = FUTURE_MULTIPLIERS.get(sym, 50.0)
                     curr_code = FUTURE_CURRENCIES.get(sym, "EUR")
-                    fx = 1.08 if curr_code == "USD" else 1.0
+                    fx = daily_fx if curr_code == "USD" else 1.0
 
                     # Note: Hedging positions are SHORT, so profit when price falls:
                     # PnL = -qty * (p_now - p_prev) * mult / fx
@@ -252,7 +287,7 @@ class WalkForwardBacktestEngine:
                     portfolio_value_eur=nav_hedged,
                     allocations_df=current_weights_df,
                     futures_quotes=cur_fut_quotes,
-                    eur_usd_rate=1.08,
+                    eur_usd_rate=daily_fx,
                 )
 
                 na_sym = hedge_summary.na_sleeve.contract_symbol
@@ -274,7 +309,7 @@ class WalkForwardBacktestEngine:
                         contract_deltas[sym] = d
                         p = cur_fut_quotes.get(sym, 5000.0)
                         m = FUTURE_MULTIPLIERS.get(sym, 50.0)
-                        fx = 1.08 if FUTURE_CURRENCIES.get(sym, "EUR") == "USD" else 1.0
+                        fx = daily_fx if FUTURE_CURRENCIES.get(sym, "EUR") == "USD" else 1.0
                         contract_notionals[sym] = p * m / fx
 
                 if contract_deltas:
@@ -331,7 +366,57 @@ class WalkForwardBacktestEngine:
         return daily_history_df, report, rebalance_log_df
 
     def _load_default_ranked_universe(self, as_of_date: str) -> pd.DataFrame:
-        """Fallback loader extracting universe from SQLite if no custom loader is provided."""
+        """Load and rank candidate universe for as_of_date using AlphaPipeline or fallback."""
+        if self.alpha_pipeline is not None:
+            try:
+                # Retrain expanding-window model if evaluating a new rebalance date
+                if self._last_alpha_train_date != as_of_date:
+                    purge_days = self.config.alpha.purge_days if self.config.alpha else 21
+                    cutoff_dt = pd.Timestamp(as_of_date) - pd.tseries.offsets.BDay(purge_days)
+                    cutoff_str = cutoff_dt.strftime("%Y-%m-%d")
+
+                    query = (
+                        "SELECT DISTINCT as_of_date FROM universe_pit "
+                        "WHERE as_of_date <= ? ORDER BY as_of_date ASC"
+                    )
+                    with self.store.get_connection() as conn:
+                        dates_df = pd.read_sql_query(query, conn, params=[cutoff_str])
+                    if isinstance(dates_df, pd.DataFrame) and "as_of_date" in dates_df.columns:
+                        hist_dates = [str(d) for d in dates_df["as_of_date"].tolist()]
+                    else:
+                        hist_dates = []
+
+                    if len(hist_dates) >= 5:
+                        labeled_data = self.alpha_pipeline.build_labeled_dataset(hist_dates)
+                        clean_data = labeled_data.dropna(subset=["target"]).reset_index(drop=True)
+                        if len(clean_data) >= 30:
+                            from quant_portfolio.config import ALL_CORE_FEATURES
+
+                            self.alpha_pipeline.model.fit(
+                                clean_data[list(ALL_CORE_FEATURES)],
+                                clean_data["target"],
+                            )
+                            self._last_alpha_train_date = as_of_date
+
+                if self.alpha_pipeline.model.is_fitted:
+                    features_t = self.alpha_pipeline.feature_pipeline.build_features_at_date(
+                        as_of_date, normalize=True
+                    )
+                    if not features_t.empty:
+                        scores = self.alpha_pipeline.model.predict(features_t)
+                        scored_universe = features_t.copy()
+                        scored_universe["score"] = scores
+                        ranked = self.alpha_pipeline.selector.rank_full_universe(scored_universe)
+                        if not ranked.empty:
+                            return ranked
+            except Exception as exc:
+                logger.warning(
+                    "AlphaPipeline ranking failed for %s, falling back to deterministic: %s",
+                    as_of_date,
+                    exc,
+                )
+
+        # Fallback loader extracting universe from SQLite if no custom loader is provided
         df = self.store.get_universe_pit(as_of_date=as_of_date, exclude_financials=True)
         if df.empty:
             df = self.store.get_universe_pit(exclude_financials=True)
@@ -340,34 +425,53 @@ class WalkForwardBacktestEngine:
                 columns=["ticker", "region_bloc", "score", "regional_decile", "regional_rank"]
             )
 
-        # Mock initial scores deterministically if feature pipeline not invoked
+        # Deterministic scoring fallback with full ranking and deciles
         unique_stocks = df.drop_duplicates(subset=["ticker"]).copy()
         unique_stocks["score"] = np.linspace(1.0, 0.0, len(unique_stocks))
-        unique_stocks["regional_decile"] = 1
-        unique_stocks["regional_rank"] = 1
-        return unique_stocks
+        return self.sleeve_selector.rank_full_universe(unique_stocks)
 
     def _fetch_daily_stock_returns(
         self,
         current_date: str,
         tickers: Sequence[str],
     ) -> dict[str, float]:
-        """Fetch daily return for held stocks on current_date from Parquet market store."""
+        """Fetch daily return for held stocks on current_date from pre-loaded matrix or Parquet."""
         if not tickers:
             return {}
 
         ret_map: dict[str, float] = {}
-        # Attempt to load recent daily returns from parquet
+
+        # 1. Try from pre-loaded returns matrix
+        if self._returns_matrix is not None and current_date in self._returns_matrix.index:
+            row = self._returns_matrix.loc[current_date]
+            for t in tickers:
+                if t in row.index:
+                    val = row[t]
+                    if pd.notna(val) and not np.isinf(cast("float", val)):
+                        ret_map[t] = cast("float", val)
+            return ret_map
+
+        # 2. Fallback: compute (tot_return_t / tot_return_{t-1}) - 1 from recent parquet data
         try:
+            start_trailing = (pd.Timestamp(current_date) - pd.Timedelta(days=7)).strftime(
+                "%Y-%m-%d"
+            )
             m_df = self.parquet_store.read_daily_market(
-                start_date=current_date,
+                start_date=start_trailing,
                 end_date=current_date,
                 tickers=list(tickers),
             )
             if not m_df.empty and "tot_return_idx_eur" in m_df.columns:
-                pass
-        except Exception:
-            pass
+                p_df = m_df.pivot(index="date", columns="ticker", values="tot_return_idx_eur")
+                pct_df = p_df.pct_change(fill_method=None)
+                if current_date in pct_df.index:
+                    row = pct_df.loc[current_date]
+                    for t in tickers:
+                        if t in row.index:
+                            val = row[t]
+                            if pd.notna(val) and not np.isinf(cast("float", val)):
+                                ret_map[t] = cast("float", val)
+        except Exception as exc:
+            logger.debug("Fallback stock returns fetch failed for %s: %s", current_date, exc)
 
-        # Return empty map (defaults to 0.0) if market store has no record for this exact day
         return ret_map
